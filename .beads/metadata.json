@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "MPIEnsemble_jl",
+  "project_id": "8c8142b7-0b02-4156-888f-51ac63607112"
+}

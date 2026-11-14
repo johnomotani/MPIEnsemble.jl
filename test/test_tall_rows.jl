@@ -126,6 +126,7 @@ end
     end
     # Input is sent as the window sends it: the pane resumes following, then the bytes are written.
     function send(bytes)
+        wait_until(() -> TALL_PTY.is_raw(s), "the REPL to read keystrokes")
         TALL_PM.resume_following!(pane)
         write(s, bytes)
     end

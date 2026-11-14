@@ -41,6 +41,7 @@ end
         feed_until!(term, ch, t -> VTE.cursor_pos(t)[1] == 3, "the third line of input")
         write(s, "end")
         feed_until!(term, ch, t -> strip(VTE.screen_lines(t)[3]) == "end", "end on the third line")
+        feed_until!(term, ch, t -> MPIEnsemble.Pty.is_raw(s), "the REPL to read keystrokes")
         write(s, "\e[A\e[A")
         feed_until!(term, ch, t -> VTE.cursor_pos(t)[1] == 1, "the cursor on the first line")
         write(s, "\e[D\e[D99")

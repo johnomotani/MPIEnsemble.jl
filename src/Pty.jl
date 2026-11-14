@@ -9,6 +9,13 @@ const F_GETFL = 3
 const F_SETFL = 4
 const TIOCSWINSZ = 0x5414
 
+# Local-mode flags of Linux `struct termios` (octal) and the byte offset of its `c_lflag` field,
+# which follows the four-byte `c_iflag`, `c_oflag` and `c_cflag` fields.
+const ICANON = 0o000002
+const ECHO = 0o000010
+const TERMIOS_LFLAG_OFFSET = 12
+const TERMIOS_BYTES = 64
+
 const CTRL_D = 0x04
 
 # Layout of Linux `struct winsize`.
@@ -128,6 +135,25 @@ function spawn(cmd::Cmd; rows::Integer = 24, cols::Integer = 80)
         # reads end-of-file or EIO once the child has closed its copies.
         slavefd >= 0 && close_fd(slavefd)
     end
+end
+
+"""
+    is_raw(s::Session) -> Bool
+
+Whether the terminal that `s`'s child is attached to has line editing (`ICANON`) and echo (`ECHO`)
+turned off, as a program that reads keystrokes itself, such as the Julia REPL at its prompt, sets
+it. While this is false the kernel buffers and echoes the bytes written to `s`, and a program that
+later switches to raw mode does not see them as separate keystrokes.
+
+Throws `SystemError` if the terminal attributes cannot be read.
+"""
+function is_raw(s::Session)
+    buf = zeros(UInt8, TERMIOS_BYTES)
+    GC.@preserve buf begin
+        @check_libc ccall(:tcgetattr, Cint, (Cint, Ptr{UInt8}), s.masterfd, buf) "tcgetattr"
+    end
+    lflag = reinterpret(UInt32, buf[TERMIOS_LFLAG_OFFSET+1:TERMIOS_LFLAG_OFFSET+4])[1]
+    return lflag & (ICANON | ECHO) == 0
 end
 
 Base.write(s::Session, x) = write(s.master, x)

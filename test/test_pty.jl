@@ -261,3 +261,24 @@ end
         end
     end
 end
+
+@testset "is_raw is false for a cooked terminal and true at the Julia prompt" begin
+    s = Pty.spawn(`sleep 30`)
+    try
+        @test !Pty.is_raw(s)
+    finally
+        close(s)
+    end
+    s = Pty.spawn(julia_child())
+    c = pty_capture(s)
+    try
+        pty_wait(c, "julia> "; timeout = 120)
+        deadline = time() + 30
+        while !Pty.is_raw(s) && time() < deadline
+            sleep(0.02)
+        end
+        @test Pty.is_raw(s)
+    finally
+        close(s)
+    end
+end

@@ -162,10 +162,13 @@ end
     end
 end
 
-# The Gui module, loaded on first use. Its window state and tab functions do not need a QML engine, so
-# the tests below run without a display. Bound at top level, so that its methods are visible to the
-# test blocks that follow.
-MPIEnsemble.gui_function(:run_single_repl)
+# The Gui module, loaded on first use. Its window state and tab functions do not need a QML engine.
+# Loading QML creates a QGuiApplication, which needs a Qt platform plugin; the offscreen plugin does not
+# need a display. The variable is set only while QML loads, as Qt reads it at that point. Bound at top
+# level, so that its methods are visible to the test blocks that follow.
+withenv("QT_QPA_PLATFORM" => "offscreen") do
+    MPIEnsemble.gui_function(:run_single_repl)
+end
 const RP_GUI = Base.invokelatest(getfield, MPIEnsemble, :Gui)
 
 @testset "window: a new tab is shown and selected before its pane is sized" begin

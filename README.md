@@ -3,7 +3,7 @@
 A window of per-rank terminal panes for interactive MPI work in Julia. Linux
 only; requires Julia 1.13 or later.
 
-This package is under development. The window so far shows one Julia REPL.
+This package is under development. The window so far shows Julia REPLs in tabs.
 
 ## Usage
 
@@ -12,7 +12,17 @@ julia --project -m MPIEnsemble [RANKS]
 ```
 
 With no argument, this opens the window and runs a Julia REPL in it. The window needs a display
-(on Linux, for example, an X server or Wayland session). Keyboard input goes to the REPL: text, Return,
+(on Linux, for example, an X server or Wayland session).
+
+The window has a tab bar across its top, with one tab for each REPL, titled "Julia 1", "Julia 2" and so on
+in the order they were opened. Clicking a tab shows its REPL, and the "+" button at the end of the bar opens
+another REPL tab and shows it. Each tab has its own REPL, output, scrollback, selection and restart prompt.
+A tab's close button, or a middle-click on the tab, closes it and ends its REPL; the tab to its right is then
+shown, or the tab to its left if there is none. Closing the last tab closes the window, and so does closing
+the window itself, which ends every REPL. Tabs keep running while they are hidden. Tabs have no keyboard
+shortcuts yet, so keys such as Ctrl+Shift+T still go to the REPL as before.
+
+Keyboard input goes to the REPL: text, Return,
 Tab, arrows, Home, End, Backspace, Delete, PageUp, PageDown, function keys, and Ctrl and Alt
 combinations. Ctrl+Shift+V pastes the clipboard. Pasted text uses bracketed paste when the REPL has
 enabled it. Ctrl+D at an empty prompt ends the REPL. A prompt at the bottom of the pane then says how it

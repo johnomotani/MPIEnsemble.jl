@@ -40,7 +40,9 @@ function pty_wait(c::PtyCapture, pat; timeout::Real = 30)
     end
 end
 
-julia_child() = Cmd(vcat(Base.julia_cmd().exec, ["-q", "--startup-file=no"]))
+# The same command as the window runs, which sets TERM so that the REPL does line editing even when the
+# test process has no TERM (as on CI).
+julia_child() = MPIEnsemble.ReplSession.julia_repl_command()
 
 # Run `f(session, capture)` in a headless Julia REPL, closing the session afterwards.
 function with_julia(f; rows::Integer = 24, cols::Integer = 80)

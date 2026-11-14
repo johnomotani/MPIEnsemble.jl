@@ -15,7 +15,7 @@ function feed_until!(term, ch, done, what::AbstractString; timeout::Real = 60)
 end
 
 @testset "REPL: an edit to an earlier line of multi-line input shows on screen" begin
-    cmd = Cmd(vcat(Base.julia_cmd().exec, ["-q", "--startup-file=no"]))
+    cmd = MPIEnsemble.ReplSession.julia_repl_command()
     s = MPIEnsemble.Pty.spawn(cmd; rows = 24, cols = 80)
     ch = Channel{Vector{UInt8}}(Inf)
     reader = @async begin

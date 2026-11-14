@@ -89,7 +89,7 @@ end
 end
 
 @testset "tall pty: an edit to line 1 of a 10-line input stays on screen" begin
-    cmd = Cmd(vcat(Base.julia_cmd().exec, ["-q", "--startup-file=no"]))
+    cmd = MPIEnsemble.ReplSession.julia_repl_command()
     s = TALL_PTY.spawn(cmd; rows = 200, cols = 80)
     ch = Channel{Vector{UInt8}}(Inf)
     reader = @async begin
@@ -163,7 +163,7 @@ end
 end
 
 @testset "tall pty: displaysize reports the tall row count" begin
-    cmd = Cmd(vcat(Base.julia_cmd().exec, ["-q", "--startup-file=no"]))
+    cmd = MPIEnsemble.ReplSession.julia_repl_command()
     s = TALL_PTY.spawn(cmd; rows = 200, cols = 80)
     ch = Channel{Vector{UInt8}}(Inf)
     reader = @async begin

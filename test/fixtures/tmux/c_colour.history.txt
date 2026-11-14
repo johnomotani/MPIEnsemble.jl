@@ -1,0 +1,24 @@
+julia> printstyled("hi\n", color=:red)
+hi
+
+julia> @warn "careful"
+┌ Warning: careful
+└ @ Main REPL[2]:1
+
+julia>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

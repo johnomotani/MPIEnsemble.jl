@@ -1,0 +1,17 @@
+name = "MPIEnsemble"
+uuid = "842cab18-bf0f-4590-b351-c56cac5de6ce"
+version = "0.1.0-DEV"
+authors = ["John Omotani <john.omotani@ukaea.uk>"]
+
+[deps]
+QML = "2db162a6-7e43-52c3-8d84-290c1c42d82a"
+
+[compat]
+QML = "0.13"
+julia = "1.13"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

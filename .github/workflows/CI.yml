@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The 'pre' job is not allowed to fail: pre-release breakage is reported as a failed check.
+        version: ['1.13', 'pre']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+          arch: x64
+
+      - uses: julia-actions/cache@v3
+
+      - name: Check Linux tools needed by the tests
+        run: |
+          for cmd in setsid setpriv; do
+            if ! command -v "$cmd" > /dev/null; then
+              echo "::error::'$cmd' is not on PATH; the tests need util-linux"
+              exit 1
+            fi
+          done
+
+      - uses: julia-actions/julia-buildpkg@v1
+
+      - uses: julia-actions/julia-runtest@v1

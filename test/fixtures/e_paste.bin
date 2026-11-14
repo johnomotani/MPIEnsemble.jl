@@ -1,0 +1,10 @@
+[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[32m[1mjulia> [0m[0m[7Cx = 1[12C
+[?2004l[0m[1m[0m[0m1
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7Cy = x + 1[16C
+[?2004l[0m[1m[0m[0m2
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7Cprintln([32m"[32msum is [32m"[39m, y)[28C[0K[32m[1mjulia> [0m[0m[7Cprintln([32m"[32msum is [32m"[39m, y)[28C
+[?2004l[0msum is 2
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C

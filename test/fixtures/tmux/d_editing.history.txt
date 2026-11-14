@@ -1,0 +1,24 @@
+julia> 2+2
+4
+
+julia> abcXYef^C
+
+julia> print
+
+print
+println
+printstyled
+julia> print^C
+
+julia> ^C
+
+julia> Zbc^C
+
+julia>
+
+
+
+
+
+
+

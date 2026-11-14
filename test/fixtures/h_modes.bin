@@ -1,0 +1,27 @@
+[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[0K[33m[1mhelp?> [0m[0m[7C[7C[0K[33m[1mhelp?> [0m[0m[7C[7C
+[?2004l[0msearch: 
+
+[1m[0m[0m  [1mWelcome to Julia 1.13.3.[22m The full manual is available at
+
+  [36mhttps://docs.julialang.org[39m
+
+  as well as many great tutorials and learning resources:
+
+  [36mhttps://julialang.org/learning/[39m
+
+  For help on a specific function or macro, type [36m?[39m followed by its name, e.g.
+  [36m?cos[39m, or [36m?@time[39m, and press enter. Type [36m;[39m to enter shell mode, [36m][39m to enter
+  package mode.
+
+  To exit the interactive session, type [36mCTRL-D[39m (press the control key together
+  with the [36md[39m key), or type [36mexit()[39m.
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[32m[1mjulia> [0m[0m[7Cp[8C[0K[32m[1mjulia> [0m[0m[7Cpr[9C[0K[32m[1mjulia> [0m[0m[7Cpri[10C[0K[32m[1mjulia> [0m[0m[7Cprin[11C[0K[32m[1mjulia> [0m[0m[7Cprint[12C[0K[32m[1mjulia> [0m[0m[7Cprintl[13C[0K[32m[1mjulia> [0m[0m[7Cprintln[14C[0K[32m[1mjulia> [0m[0m[7Cprintln[14C
+[?2004l[0m[1m[0m[0mprintln (generic function with 5 methods)
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[0K[32m[1mjulia> [0m[0m[7C[7C[0K[0K[31m[1mshell> [0m[0m[7C[7C[0K[31m[1mshell> [0m[0m[7Ce[8C[0K[31m[1mshell> [0m[0m[7Cec[9C[0K[31m[1mshell> [0m[0m[7Cech[10C[0K[31m[1mshell> [0m[0m[7Cecho[11C[0K[31m[1mshell> [0m[0m[7Cecho [12C[0K[31m[1mshell> [0m[0m[7Cecho h[13C[0K[31m[1mshell> [0m[0m[7Cecho hi[14C[0K[31m[1mshell> [0m[0m[7Cecho hi[14C
+[?2004l[0mhi
+
+[?2004h[0K[31m[1mshell> [0m[0m[7C[7C[0K[31m[1mshell> [0m[0m[7C[7C^C
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[0K[32m[1mjulia> [0m[0m[7C[7C

@@ -1,0 +1,24 @@
+julia> x = 1
+1
+
+julia> y = x + 1
+2
+
+julia> println("sum is ", y)
+sum is 2
+
+julia>
+
+
+
+
+
+
+
+
+
+
+
+
+
+

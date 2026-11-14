@@ -1,0 +1,17 @@
+[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[32m[1mjulia> [0m[0m[7C1[8C[0K[32m[1mjulia> [0m[0m[7C1+[9C[0K[32m[1mjulia> [0m[0m[7C1+1[10C[0K[32m[1mjulia> [0m[0m[7C1+1[10C
+[?2004l[0m[1m[0m[0m2
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[32m[1mjulia> [0m[0m[7Cf[8C[0K[32m[1mjulia> [0m[0m[7Cf[1m[4m()[22m[24m[9C[0K[32m[1mjulia> [0m[0m[7Cf()[10C[0K[32m[1mjulia> [0m[0m[7Cf() [11C[0K[32m[1mjulia> [0m[0m[7Cf() =[12C[0K[32m[1mjulia> [0m[0m[7Cf() = [13C[0K[32m[1mjulia> [0m[0m[7Cf() = e[14C[0K[32m[1mjulia> [0m[0m[7Cf() = er[15C[0K[32m[1mjulia> [0m[0m[7Cf() = err[16C[0K[32m[1mjulia> [0m[0m[7Cf() = erro[17C[0K[32m[1mjulia> [0m[0m[7Cf() = error[18C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m()[22m[24m[19C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m([32m[22m[24m""[39m[1m[4m)[22m[24m[20C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m([32m[22m[24m"[32mb[32m"[39m[1m[4m)[22m[24m[21C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m([32m[22m[24m"[32mbo[32m"[39m[1m[4m)[22m[24m[22C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m([32m[22m[24m"[32mboo[32m"[39m[1m[4m)[22m[24m[23C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m([32m[22m[24m"[32mboom[32m"[39m[1m[4m)[22m[24m[24C[0K[32m[1mjulia> [0m[0m[7Cf() = error[1m[4m([32m[22m[24m"[32mboom[32m"[39m[1m[4m)[22m[24m[25C[0K[32m[1mjulia> [0m[0m[7Cf() = error([32m"[32mboom[32m"[39m)[26C[0K[32m[1mjulia> [0m[0m[7Cf() = error([32m"[32mboom[32m"[39m)[26C
+[?2004l[0m[1m[0m[0mf (generic function with 1 method)
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C[0K[32m[1mjulia> [0m[0m[7Cf[8C[0K[32m[1mjulia> [0m[0m[7Cf[1m[4m()[22m[24m[9C[0K[32m[1mjulia> [0m[0m[7Cf()[10C[0K[32m[1mjulia> [0m[0m[7Cf()[10C
+[?2004l[0m[91m[1mERROR: [22m[39mboom
+Stacktrace:
+ [1] [0m[1merror[22m[0m[1m([22m[90ms[39m::[0mString[0m[1m)[22m
+ [90m  @[39m [90mBase[39m [90m./[39m[90m[4merror.jl:44[24m[39m
+ [2] [0m[1mf[22m[0m[1m([22m[0m[1m)[22m
+ [90m  @[39m [35mMain[39m [90m./[39m[90m[4mREPL[2]:1[24m[39m
+ [3] top-level scope
+ [90m  @[39m [90m[4mREPL[3]:1[24m[39m
+
+[0K[0K[32m[1mjulia> [0m[0m[7C[7C[?2004h[0K[32m[1mjulia> [0m[0m[7C[7C

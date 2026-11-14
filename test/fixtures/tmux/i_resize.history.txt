@@ -1,0 +1,40 @@
+julia> displaysize(stdout)
+(24, 80)
+
+julia> displaysize(stdout)
+(40, 100)
+
+julia> println("y"^120)
+yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+yyyyyyyyyyyyyyyyyyyy
+
+julia>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

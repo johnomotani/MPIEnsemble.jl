@@ -151,7 +151,18 @@ fd_count() = length(readdir("/proc/self/fd"))
     end
 end
 
-# True once the process has exited, or is a zombie awaiting reaping.
+# The state field of a /proc/<pid>/stat line, or `nothing` if the line is incomplete. The command
+# name is in parentheses and may contain ')', so the state follows the last ')'.
+function stat_state(stat::AbstractString)
+    parts = rsplit(stat, ')'; limit = 2)
+    length(parts) == 2 || return nothing
+    fields = split(parts[2])
+    length(fields) >= 2 || return nothing
+    return String(fields[1])
+end
+
+# True once the process has exited, or is a zombie awaiting reaping. An incomplete stat line
+# means the process is mid-exit: it is gone only once its directory has disappeared.
 function process_gone(pid::Integer)
     isdir("/proc/$pid") || return true
     stat = try
@@ -159,7 +170,19 @@ function process_gone(pid::Integer)
     catch
         return true
     end
-    return split(split(stat, ')'; limit = 2)[2])[1] == "Z"
+    state = stat_state(stat)
+    state === nothing && return !isdir("/proc/$pid")
+    return state == "Z"
+end
+
+@testset "stat_state reads the state after the command name" begin
+    @test stat_state("123 (julia) S 1 123 123 0 -1 4194560") == "S"
+    @test stat_state("456 (sleep) Z 1 456 456 0 -1 4194560") == "Z"
+    @test stat_state("7 (a) b) Z 1 7 7 0 -1 4194560") == "Z"
+    @test stat_state("") === nothing
+    @test stat_state("123 (julia") === nothing
+    @test stat_state("123 (julia) ") === nothing
+    @test stat_state("123 (julia) S") === nothing
 end
 
 environ_has(pid::Integer, entry::AbstractString) = entry in split(read("/proc/$pid/environ", String), '\0')

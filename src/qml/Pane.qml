@@ -1,11 +1,14 @@
 import QtQuick
 import jlqml
 
-// REPL pane: a ListView over the Julia-side row model, one HTML row per item. The row height and
-// the column width are measured with TextMetrics and reported to Julia, which sizes the terminal in
-// cells. Julia decides the window position. This file reports user scrolling, applies the offset
-// that Julia returns after a refill. When Julia says the pane is following, the view moves to the
-// row Julia names (the cursor row, when it is above the end of the output) or to the end.
+// REPL pane for one tab: a ListView over the tab's row model, one HTML row per item. Main.qml creates
+// one per tab and sets `tabId`, `rowModel` and `props` from the tab model. Calls to Julia name the tab
+// with `tabId` first, except `isPasteChord`, which only looks at the key. A pane is visible only when
+// its tab is selected. The row height and the column width are measured with TextMetrics and reported
+// to Julia, which sizes the terminal in cells. Julia decides the window position. This file reports
+// user scrolling, applies the offset that Julia returns after a refill. When Julia says the pane is
+// following, the view moves to the row Julia names (the cursor row, when it is above the end of the
+// output) or to the end.
 //
 // The pane holds keyboard focus. Each key press is passed to Julia, which writes the bytes for the
 // child process; the event is accepted only when Julia reports that it sent something. Ctrl+Shift+V
@@ -25,7 +28,10 @@ Rectangle {
     border.color: "#7aa2f7"
     border.width: 2
     radius: 4
-    focus: true
+
+    required property int tabId
+    required property var rowModel
+    required property var props
 
     readonly property real cellW: metrics.advanceWidth / 10
     readonly property real cellH: Math.ceil(metrics.height)
@@ -38,9 +44,10 @@ Rectangle {
         text: "MMMMMMMMMM"
     }
 
+    // Sizes the tab's terminal. A hidden pane reports nothing: it is sized when it is shown.
     function reportSize() {
-        if (view.width > 0 && view.height > 0)
-            Julia.paneSized(view.width, view.height, cellW, cellH)
+        if (visible && view.width > 0 && view.height > 0)
+            Julia.paneSized(tabId, view.width, view.height, cellW, cellH)
     }
 
     function snapToEnd() {
@@ -85,9 +92,20 @@ Rectangle {
             snapToEnd()
     }
 
-    Component.onCompleted: {
+    // Shown panes take the keyboard. A pane that is hidden is sized when it is shown again.
+    function show() {
         reportSize()
         forceActiveFocus()
+    }
+
+    Component.onCompleted: {
+        if (visible)
+            show()
+    }
+
+    onVisibleChanged: {
+        if (visible)
+            show()
     }
 
     // Modifier keys alone leave the selection alone, so that Shift can be held before a Shift-click.
@@ -97,27 +115,27 @@ Rectangle {
     }
 
     Keys.onPressed: function (event) {
-        // After the REPL has ended, Return restarts it. Other keys are not sent, as before.
+        // After the REPL has ended, Return restarts it. Other keys are not sent.
         if (props.ended && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
-            Julia.restartSession()
+            Julia.restartSession(pane.tabId)
             event.accepted = true
             return
         }
         // Jump keys scroll the view and are not sent to the child. They keep the selection.
-        var row = Julia.scrollKey(event.key, event.modifiers)
+        var row = Julia.scrollKey(pane.tabId, event.key, event.modifiers)
         if (row >= 0) {
             pane.applyRow(row)
             event.accepted = true
             return
         }
         if (!pane.isModifierKey(event.key))
-            Julia.clearSelection()
+            Julia.clearSelection(pane.tabId)
         if (Julia.isPasteChord(event.key, event.modifiers)) {
             pasteBuffer.text = ""
             pasteBuffer.paste()
-            event.accepted = Julia.pasteText(pasteBuffer.text)
+            event.accepted = Julia.pasteText(pane.tabId, pasteBuffer.text)
         } else {
-            event.accepted = Julia.keyPressed(event.key, event.text, event.modifiers)
+            event.accepted = Julia.keyPressed(pane.tabId, event.key, event.text, event.modifiers)
         }
     }
 
@@ -147,7 +165,7 @@ Rectangle {
             var count = Math.ceil(height / pane.cellH)
             // Within one row of the end counts as the end: a wheel scroll can stop just short of it.
             var atEnd = contentY >= contentHeight - height - pane.cellH
-            var shift = Julia.userScrolled(first, count, atEnd)
+            var shift = Julia.userScrolled(pane.tabId, first, count, atEnd)
             if (shift != 0) {
                 // The matrix moved by `shift` rows; keep the same rows in view.
                 syncing = true
@@ -214,7 +232,7 @@ Rectangle {
                     grabOffset = mouse.y - t
                 } else {
                     dragging = false
-                    pane.applyRow(Julia.pageView(mouse.y < t ? -1 : 1))
+                    pane.applyRow(Julia.pageView(pane.tabId, mouse.y < t ? -1 : 1))
                 }
             }
 
@@ -222,7 +240,7 @@ Rectangle {
                 if (!dragging || bar.room <= 0)
                     return
                 var f = Math.max(0, Math.min(1, (mouse.y - grabOffset) / bar.room))
-                pane.applyRow(Julia.scrollToFraction(f))
+                pane.applyRow(Julia.scrollToFraction(pane.tabId, f))
             }
 
             onReleased: dragging = false
@@ -255,7 +273,7 @@ Rectangle {
                 clicks = 0
                 lastTime = 0
                 dragSelects = true
-                Julia.selectionExtendStart(slot, col)
+                Julia.selectionExtendStart(pane.tabId, slot, col)
                 return
             }
             var now = Date.now()
@@ -266,22 +284,22 @@ Rectangle {
             lastY = mouse.y
             dragSelects = clicks === 1
             if (clicks === 1)
-                Julia.selectionStart(slot, col)
+                Julia.selectionStart(pane.tabId, slot, col)
             else if (clicks === 2)
-                Julia.selectWord(slot, col)
+                Julia.selectWord(pane.tabId, slot, col)
             else
-                Julia.selectLine(slot)
+                Julia.selectLine(pane.tabId, slot)
         }
 
         onPositionChanged: function (mouse) {
             dragX = mouse.x
             dragY = mouse.y
             if (pressed && dragSelects)
-                Julia.selectionExtend(pane.slotAt(mouse.y), pane.colAt(mouse.x))
+                Julia.selectionExtend(pane.tabId, pane.slotAt(mouse.y), pane.colAt(mouse.x))
         }
 
         onReleased: function (mouse) {
-            Julia.selectionEnd()
+            Julia.selectionEnd(pane.tabId)
         }
 
         // While a drag is above or below the view, scroll one row per tick and extend the selection
@@ -297,7 +315,7 @@ Rectangle {
                 view.contentY = Math.max(0, Math.min(view.contentY + dir * pane.cellH, maxY))
                 var first = Math.floor(view.contentY / pane.cellH) + 1
                 var last = Math.floor((view.contentY + view.height - 1) / pane.cellH) + 1
-                Julia.selectionExtend(dir < 0 ? first : last, pane.colAt(selector.dragX))
+                Julia.selectionExtend(pane.tabId, dir < 0 ? first : last, pane.colAt(selector.dragX))
             }
         }
     }
@@ -351,7 +369,7 @@ Rectangle {
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton
                 onPressed: pane.forceActiveFocus()
-                onClicked: Julia.restartSession()
+                onClicked: Julia.restartSession(pane.tabId)
             }
         }
     }

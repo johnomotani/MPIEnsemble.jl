@@ -17,6 +17,8 @@ include("LineLog.jl")
 include("PtyOutput.jl")
 include("ReplSession.jl")
 include("PaneModel.jl")
+include("ReplPane.jl")
+include("TabSet.jl")
 
 const GUI_FILE = joinpath(@__DIR__, "Gui.jl")
 
@@ -42,9 +44,9 @@ end
 """
     run_single_repl(; startup_input = "", tall_rows = nothing) -> Nothing
 
-Open the single-REPL window and block until it is closed. See `Gui.run_single_repl`, which this
-loads on first use. Opening a window needs a display. Arguments are checked before the GUI code is
-loaded, so invalid ones are reported without a display.
+Open the window, with one REPL tab, and block until it is closed. See `Gui.run_single_repl`, which this
+loads on first use. Opening a window needs a display. Arguments are checked before the GUI code is loaded,
+so invalid ones are reported without a display.
 """
 function run_single_repl(; tall_rows = nothing, kwargs...)
     tall = check_tall_rows(tall_rows)

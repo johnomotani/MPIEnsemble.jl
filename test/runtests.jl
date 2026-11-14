@@ -16,4 +16,6 @@ using MPIEnsemble
     include("test_selection.jl")
     include("test_tall_rows.jl")
     include("test_scrollbar.jl")
+    include("test_tabset.jl")
+    include("test_repl_pane.jl")
 end

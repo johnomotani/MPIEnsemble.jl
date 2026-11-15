@@ -736,7 +736,7 @@ end
 
 @testset "MPI tab: the window's count opens the first MPI tab, and a window without one cannot open it" begin
     win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
-    @test_throws "has no rank count" MT_GUI.open_mpi_tab!(win)
+    @test_throws "there are no MPI ranks to launch" MT_GUI.open_mpi_tab!(win)
     @test isempty(win.tabs.tabs)
     @test win.props["askLaunch"] == true
     mt_with() do

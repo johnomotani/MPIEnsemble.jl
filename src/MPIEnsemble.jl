@@ -51,17 +51,29 @@ function check_rank_count(rank_count)
     return Int(rank_count)
 end
 
+# The start-up count: `nothing` asks the launch dialog, 0 opens a serial Julia REPL, and a positive integer
+# opens an MPI tab with that many ranks. Its value is returned as an `Int`, or `nothing`.
+function check_startup_count(rank_count)
+    rank_count === nothing && return nothing
+    if !(rank_count isa Integer) || rank_count isa Bool || rank_count < 0
+        throw(ArgumentError("rank count must be a non-negative integer (0 for a serial Julia REPL), " *
+            "got $(repr(rank_count))"))
+    end
+    return Int(rank_count)
+end
+
 """
     run_single_repl(; tall_rows = nothing, rank_count = nothing) -> Nothing
 
-Open the window and block until it is closed. With `rank_count`, the window's only tab at start-up is an MPI
-tab with that many ranks; without it, a launch dialog asks for the first tab, which may be a serial Julia
-REPL or an MPI tab. See `Gui.run_single_repl`, which this loads on first use. Opening a window needs a
-display. Arguments are checked before the GUI code is loaded, so invalid ones are reported without a display.
+Open the window and block until it is closed. `rank_count` sets the window's only tab at start-up: `0` gives a
+serial Julia REPL tab, a positive integer gives an MPI tab with that many ranks, and `nothing` (the default)
+gives no tab and a launch dialog asks for the first tab. See `Gui.run_single_repl`, which this loads on first
+use. Opening a window needs a display. Arguments are checked before the GUI code is loaded, so invalid ones are
+reported without a display.
 """
 function run_single_repl(; tall_rows = nothing, rank_count = nothing, kwargs...)
     tall = check_tall_rows(tall_rows)
-    ranks = check_rank_count(rank_count)
+    ranks = check_startup_count(rank_count)
     return Base.invokelatest(gui_function(:run_single_repl); tall_rows = tall, rank_count = ranks, kwargs...)
 end
 
@@ -82,15 +94,16 @@ end
 """
     main(args = ARGS) -> Int
 
-Run MPIEnsemble, which opens the window and blocks until it is closed. `args` may hold one positive integer,
-the number of MPI ranks. With it, the window's only tab at start-up is an MPI tab with that many ranks.
-Without it, the window has no tab until its launch dialog is answered: "Serial Julia REPL" opens a REPL tab,
-and "MPI with N ranks" opens an MPI tab. Cancel closes the window. No MPI ranks are launched by this function
-itself.
+Run MPIEnsemble, which opens the window and blocks until it is closed. `args` may hold one non-negative integer.
+`0` makes the window's only tab at start-up a serial Julia REPL. A positive integer `N` makes it an MPI tab with
+`N` ranks. Without an argument, the window has no tab until its launch dialog is answered: "Serial Julia REPL"
+opens a REPL tab, and "MPI with N ranks" opens an MPI tab. Cancel closes the window. No MPI ranks are launched by
+this function itself.
 The window's pseudo-terminal is sized to the pane unless the environment variable
 `MPIENSEMBLE_TALL_PTY_ROWS` is set to a positive integer, which gives it that many rows or the pane's rows
 if more; see `Gui.run_single_repl`.
-Throws `ArgumentError` on invalid arguments or an invalid environment variable, before any window opens.
+Throws `ArgumentError` on invalid arguments (more than one, or not a non-negative integer) or an invalid
+environment variable, before any window opens.
 Returns the process exit code, `0`.
 """
 function main(args = ARGS)

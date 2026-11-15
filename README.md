@@ -9,16 +9,23 @@ MPI rank. A window may hold several MPI tabs, each with its own job.
 ## Usage
 
 ```
-julia --project -m MPIEnsemble [RANKS]
+julia --project -m MPIEnsemble [N]
 ```
 
-The optional argument `RANKS` is the number of MPI ranks, a positive integer. Without it, the window has no tab
-at first, and a launch dialog asks what to open: "Serial Julia REPL", or "MPI with N ranks" for a whole number N
-of 1 or more. The dialog's result becomes the first tab. Cancel closes the window, which then ends the program
-without error. The "+" button in the tab bar opens the same dialog, and its result is a new tab; Cancel then adds
-nothing.
+The optional argument `N` is a non-negative whole number, and it sets the window's first tab:
 
-With a number, the window's only tab at start-up is an MPI tab, and it starts that many ranks under the
+- `0` opens a window whose only tab is a serial Julia REPL, for example `julia --project -m MPIEnsemble 0`.
+- A positive number, such as `julia --project -m MPIEnsemble 4`, opens an MPI tab with that many ranks.
+- Without an argument, the window has no tab at first, and a launch dialog asks what to open: "Serial Julia
+  REPL", or "MPI with N ranks" for a whole number N of 1 or more. The dialog's result becomes the first tab.
+  Cancel closes the window, which then ends the program without error.
+
+Any other argument, such as a negative number, a non-integer or more than one argument, is an error. It is
+reported before a window opens, and the program exits with an error.
+
+The "+" button in the tab bar opens the launch dialog, and its result is a new tab; Cancel then adds nothing.
+
+With a positive number, the window's only tab at start-up is an MPI tab, and it starts that many ranks under the
 `mpiexec` given by MPIPreferences.jl (see MPI builds below). The window has no REPL tab until one is opened with
 "+". The "+" dialog can open another MPI tab with any number of ranks, and it starts with the count last used.
 Each MPI tab has its own job, so several jobs can run at once. Each tab says "Starting N MPI ranks…" until the

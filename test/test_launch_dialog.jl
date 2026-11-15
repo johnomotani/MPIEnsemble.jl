@@ -142,3 +142,26 @@ end
     end
     @test LD_GUI.TabSet.window_should_close(win.tabs) == false
 end
+
+@testset "launch dialog: after a serial start-up, + opens a serial tab and an MPI tab" begin
+    win = LD_GUI.WindowState("", nothing, 0; launch_options = LD_OPTIONS)
+    ld_with() do
+        try
+            LD_GUI.open_startup_tab!(win)
+            @test ld_kinds(win) == [:repl]
+            LD_GUI.launch_serial!(win)
+            @test ld_titles(win) == ["Julia 1", "Julia 2"]
+            LD_GUI.launch_mpi!(win, 2)
+            @test ld_kinds(win) == [:repl, :repl, :mpi]
+            @test ld_titles(win) == ["Julia 1", "Julia 2", "MPI"]
+            @test win.props["askLaunch"] == false
+            @test win.props["lastRanks"] == 2
+            mpi = win.tabs.tabs[3].state
+            ld_run_until(() -> mpi.status !== :starting, win)
+            @test mpi.nranks == 2
+            @test length(mpi.views) == 2
+        finally
+            LD_GUI.shutdown!(win)
+        end
+    end
+end

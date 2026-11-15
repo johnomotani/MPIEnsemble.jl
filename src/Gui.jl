@@ -20,7 +20,7 @@ import ..ReplPane
 import ..TabSet
 import ..MpiLauncher
 using ..ReplSession: describe_exit, has_ended, is_started
-using ..MPIEnsemble: check_tall_rows, check_rank_count
+using ..MPIEnsemble: check_tall_rows, check_rank_count, check_startup_count
 using ..VTParse: application_cursor, bracketed_paste
 using ..KeyMap: key_bytes, paste_bytes, is_paste_chord
 using ..PaneModel: follow_row, select_start!, select_extend!, select_extend_start!, select_end!,
@@ -120,12 +120,12 @@ end
 # holds the ids of the panes that were closed. `tab_rows` is the tab bar's model, and `mpi_tabs` is the
 # model of the open MPI tabs, which QML repeats: each item is a `TabSet.Tab` whose state is an `MpiTab`.
 # `repl_panes` is the model that QML repeats for the REPL panes. `props` holds the window's properties
-# (see `WindowState`). `rank_count` is the number of MPI ranks given on the command line, or `nothing`;
-# it opens the first MPI tab at start-up (see `open_mpi_tab!`). `closing` holds ids of tabs whose close
-# was requested; they are closed by the event loop, not by the QML call. `failure` is the first error
-# raised in a QML call, which the event loop rethrows. `offset` is where the fair drain of the panes
-# starts next time (see `TabSet.drain_fairly!`). `launch_options` are keyword arguments for
-# `MpiLauncher.launch`.
+# (see `WindowState`). `rank_count` is the start-up count given on the command line: `nothing`, `0` for a
+# serial REPL tab, or the number of MPI ranks for an MPI tab. It opens the first tab at start-up (see
+# `open_startup_tab!`). `closing` holds ids of tabs whose close was requested; they are closed by the event
+# loop, not by the QML call. `failure` is the first error raised in a QML call, which the event loop
+# rethrows. `offset` is where the fair drain of the panes starts next time (see `TabSet.drain_fairly!`).
+# `launch_options` are keyword arguments for `MpiLauncher.launch`.
 mutable struct WindowState
     const tabs::TabSet.Tabs
     const views::Dict{Int, TabView}
@@ -153,7 +153,8 @@ function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, In
     props["closeRequest"] = 0
     # `askLaunch` is true while the window has no tab yet, and the launch dialog is to be shown at start-up.
     props["askLaunch"] = rank_count === nothing
-    # `lastRanks` is the rank count of the MPI tab opened last, or 0. The launch dialog starts with it.
+    # `lastRanks` is the rank count of the MPI tab opened last, or 0. The launch dialog starts with it, and
+    # with 0 it starts at "Serial Julia REPL".
     props["lastRanks"] = rank_count === nothing ? 0 : rank_count
     rows = QML.JuliaItemModel(TabSet.Tab[], false)
     QML.addrole!(rows, "tabId", t -> t.id)
@@ -281,12 +282,12 @@ end
 Open the window and run the Qt event loop on the calling thread until the window is closed. Must be called
 from the main thread, not from an `@async` task. Throws an error if a window is already open in this process.
 
-`rank_count` is the number of MPI ranks, or `nothing`. With a count, the window's only tab at start-up is an
-MPI tab, which launches that many ranks (see `open_mpi_tab!`); the window then has no REPL tab until one is
-opened with "+". Without a count, the window has no tab at start-up and first shows a modal launch dialog,
-which asks for the first tab. The dialog offers "Serial Julia REPL", which opens a REPL tab, or "MPI with N
-ranks", which opens an MPI tab with N ranks, where N is a whole number of 1 or more. Cancel, or Escape,
-closes the window, and this function then returns. An invalid `rank_count` throws `ArgumentError`.
+`rank_count` sets the window's only tab at start-up. `0` opens a serial Julia REPL tab, and a positive integer
+opens an MPI tab that launches that many ranks (see `open_mpi_tab!`). With a positive count, the window has no
+REPL tab until one is opened with "+". With `nothing`, the window has no tab at start-up and first shows a modal
+launch dialog, which asks for the first tab. The dialog offers "Serial Julia REPL", which opens a REPL tab, or
+"MPI with N ranks", which opens an MPI tab with N ranks, where N is a whole number of 1 or more. Cancel, or
+Escape, closes the window, and this function then returns. An invalid `rank_count` throws `ArgumentError`.
 
 Each REPL tab is an independent REPL with its own pane, output, scrollback, selection, scrollbar and restart
 prompt. The tab bar at the top of the window lists the tabs as "Julia 1", "Julia 2", and so on, in the
@@ -353,7 +354,7 @@ The zoom survives a Kill MPI, a restart, and a change of tab. Each MPI tab has i
 """
 function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing, rank_count = nothing)
     tall = check_tall_rows(tall_rows)
-    ranks = check_rank_count(rank_count)
+    ranks = check_startup_count(rank_count)
     WINDOW_OPEN[] && error("the MPIEnsemble window is already open in this process")
     win = WindowState(startup_input, tall, ranks)
     register_functions!(win)
@@ -361,7 +362,7 @@ function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothi
     try
         QML.loadqml(QML_MAIN; tabModel = win.tab_rows, replModel = win.repl_panes, mpiTabs = win.mpi_tabs,
             windowProps = win.props)
-        ranks === nothing || open_mpi_tab!(win, ranks)
+        open_startup_tab!(win)
         run_loop!(win)
     finally
         WINDOW_OPEN[] = false
@@ -609,14 +610,29 @@ function open_mpi_tab!(win::WindowState, nranks::Integer)
 end
 
 """
+    open_startup_tab!(win) -> Nothing
+
+Open the first tab that the command line asked for: nothing when the window's `rank_count` is `nothing`
+(the launch dialog then asks), a serial REPL tab when it is `0`, and an MPI tab with that many ranks otherwise.
+"""
+function open_startup_tab!(win::WindowState)
+    n = win.rank_count
+    n === nothing && return nothing
+    n == 0 ? launch_serial!(win) : open_mpi_tab!(win, n)
+    return nothing
+end
+
+"""
     open_mpi_tab!(win) -> Tab
 
 Open the MPI tab that the command line asked for, with the window's rank count (see `open_mpi_tab!(win, nranks)`).
-Throws if the window was not given a rank count.
+Throws if the window's rank count is `nothing` or `0`, which give no MPI tab.
 """
 function open_mpi_tab!(win::WindowState)
-    win.rank_count === nothing && error("the window has no rank count, so there are no MPI ranks to launch")
-    return open_mpi_tab!(win, win.rank_count)
+    n = win.rank_count
+    (n === nothing || n == 0) &&
+        error("the window's rank count is $(repr(n)), so there are no MPI ranks to launch")
+    return open_mpi_tab!(win, n)
 end
 
 # Set the status of an MPI tab and the properties that QML reads for it. `message` is the text shown in

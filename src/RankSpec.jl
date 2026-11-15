@@ -11,9 +11,9 @@ export parse_rank_count
 """
     parse_rank_count(args) -> Union{Nothing,Int}
 
-Return the rank count given as the optional single positional argument in
-`args`, or `nothing` if `args` is empty. Throw an `ArgumentError` if there is
-more than one argument or the argument is not a positive integer.
+Return the count given as the optional single positional argument in `args`, or `nothing` if `args` is empty.
+A count of `0` means a serial Julia REPL rather than MPI ranks; a positive count is the number of MPI ranks.
+Throw an `ArgumentError` if there is more than one argument or the argument is not a non-negative integer.
 """
 function parse_rank_count(args)
     isempty(args) && return nothing
@@ -21,8 +21,8 @@ function parse_rank_count(args)
         throw(ArgumentError("expected at most one argument (the rank count), got $(length(args))"))
     arg = only(args)
     n = tryparse(Int, arg)
-    (n !== nothing && n >= 1) ||
-        throw(ArgumentError("rank count must be a positive integer, got \"$arg\""))
+    (n !== nothing && n >= 0) ||
+        throw(ArgumentError("rank count must be a non-negative integer (0 for a serial Julia REPL), got \"$arg\""))
     return n
 end
 

@@ -179,8 +179,11 @@ write_item!(connection::MpiLauncher.RankConnection, ::ConnectionInterrupt) = Mpi
 write_item!(connection::MpiLauncher.RankConnection, resize::ConnectionResize) =
     MpiLauncher.send_resize!(connection, resize.rows, resize.cols)
 
-# Whether `err`, from writing to a socket, means that the peer has closed it.
-peer_closed(err) = err isa Base.IOError && err.code in (Base.UV_EPIPE, Base.UV_ECONNRESET)
+# Whether `err`, from writing to a rank's socket, means that the wrapper has closed its end. Depending on
+# timing, the write fails with EPIPE, with ECONNRESET, or, once the reader has seen end of file, with an
+# IOError that Julia reports as "stream is closed or unusable" (code 0). Every IOError from the socket is
+# therefore that the wrapper has closed it, and the connection's reader reports how the rank ended.
+peer_closed(err) = err isa Base.IOError
 
 # Whether the session's child has ended: a process has exited, or a connection has delivered its EXIT frame.
 transport_ended(session::Pty.Session) = process_exited(session.process)

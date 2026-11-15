@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls as Controls
 import jlqml
 
 // Terminal pane: a ListView over the pane's row model, one HTML row per item. Each pane is a REPL pane
@@ -13,7 +14,9 @@ import jlqml
 //
 // A REPL pane takes the keyboard when it is shown. A rank pane (`rankPane`) takes it only when its owner
 // gives it the focus, and its border is dim while it does not have the focus. A rank pane cannot be
-// restarted, so its end prompt has no Restart button and Return does nothing there.
+// restarted, so its end prompt has no Restart button and Return does nothing there. A rank pane has a
+// selection box, which Julia uses to choose the ranks that receive input. The box is checked with a cross
+// while its rank is the only one that receives input.
 //
 // The pane holds keyboard focus. Each key press is passed to Julia, which writes the bytes for the
 // child process; the event is accepted only when Julia reports that it sent something. Ctrl+Shift+V
@@ -198,6 +201,15 @@ Rectangle {
         }
     }
 
+    // A rank pane that does not receive input from the focused pane is dimmed over its output. It takes no
+    // mouse input, so the output beneath still gets presses and drags.
+    Rectangle {
+        anchors.fill: view
+        color: "#1a1b26"
+        opacity: props.dimmed ? 0.5 : 0
+        enabled: false
+    }
+
     // Scrollbar. The thumb's size and position are fractions of the whole output, which Julia supplies
     // (see `PaneModel.scrollbar_state`). The thumb is at least `minThumb` pixels, so that it can be
     // grabbed at any output length. A drag keeps the pointer's offset in the thumb, and Julia maps the
@@ -329,7 +341,7 @@ Rectangle {
             }
         }
     }
-    // The MPI rank of a rank pane, at the top-right of the output, just left of the scrollbar. It takes no
+    // The MPI rank of a rank pane, at the top-right of the output, left of the selection box. It takes no
     // mouse input, so presses and drags reach the output beneath it, and it is not part of the text selection.
     Rectangle {
         id: rankBadge
@@ -340,7 +352,7 @@ Rectangle {
         enabled: false
         anchors.top: parent.top
         anchors.topMargin: 6
-        anchors.right: bar.left
+        anchors.right: selectButton.left
         anchors.rightMargin: 4
         width: Math.max(minWidth, badgeText.implicitWidth + 2 * padX)
         height: badgeText.implicitHeight + 2 * padY
@@ -354,6 +366,58 @@ Rectangle {
             color: "#a9b1d6"
             font.pixelSize: 13
         }
+    }
+
+    // The selection box of a rank pane, at the top-right of the output, just left of the scrollbar. It is a
+    // square the height of the rank badge. It shows `props.selected` as a cross. Clicking it toggles the
+    // selection of the rank (Julia.toggleRank). A press gives the pane the focus, so that the keyboard stays
+    // with a rank pane after the click. The tooltip says what the click does.
+    Rectangle {
+        id: selectButton
+        readonly property real side: rankBadge.height
+        visible: rankPane
+        anchors.top: parent.top
+        anchors.topMargin: 6
+        anchors.right: bar.left
+        anchors.rightMargin: 4
+        width: side
+        height: side
+        radius: 3
+        color: selectMouse.containsMouse ? "#3b4261" : "#cc1f2335"
+        border.color: props.selected ? "#7aa2f7" : "#a9b1d6"
+        border.width: 1
+
+        // The two strokes of the cross, drawn only while the box is checked.
+        Rectangle {
+            visible: props.selected
+            anchors.centerIn: parent
+            width: selectButton.side * 0.8
+            height: 2
+            color: "#7aa2f7"
+            rotation: 45
+        }
+
+        Rectangle {
+            visible: props.selected
+            anchors.centerIn: parent
+            width: selectButton.side * 0.8
+            height: 2
+            color: "#7aa2f7"
+            rotation: -45
+        }
+
+        MouseArea {
+            id: selectMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton
+            onPressed: pane.forceActiveFocus()
+            onClicked: Julia.toggleRank(pane.paneId)
+        }
+
+        Controls.ToolTip.visible: selectMouse.containsMouse
+        Controls.ToolTip.delay: 500
+        Controls.ToolTip.text: props.selected ? "Send keys to all ranks" : "Send keys only to this rank"
     }
 
     // Shown after the REPL has ended, or after a rank's connection has failed. It lies over the bottom of the

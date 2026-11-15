@@ -80,7 +80,10 @@ turns the result into panes and state (see `finish_launch!`), so the task itself
 `offset` is where the fair drain of the rank panes starts next time (see `TabSet.drain_fairly!`).
 `targets` is the set of ranks that receive input from the focused pane, and it holds every rank once the job
 has started (see `attach_job!`). `zoomed` is the rank that alone receives input, or `nothing`. Both are
-read by `route_targets`.
+read by `route_targets`. `selected` is the rank that the user has selected with its Select button, or `nothing`
+when no rank has been selected. `select_rank!` and `toggle_rank!` change `selected`, and `targets` with it: while
+`selected` is a rank, `targets` is that rank alone. The two are kept apart because a job with one rank
+has that rank as its only target without any selection.
 """
 mutable struct MpiTab
     const nranks::Int
@@ -92,10 +95,12 @@ mutable struct MpiTab
     result::Any
     offset::Int
     targets::Set{Int}
+    selected::Union{Nothing, Int}
     zoomed::Union{Nothing, Int}
 end
 
-MpiTab(nranks::Int) = MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0, Set{Int}(), nothing)
+MpiTab(nranks::Int) =
+    MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0, Set{Int}(), nothing, nothing)
 
 # State of the window. `views` maps the pane ids of the open panes to their views, and `closed_panes`
 # holds the ids of the panes that were closed. `tab_rows` is the tab bar's model. `repl_panes` and
@@ -186,6 +191,8 @@ function new_view(win::WindowState, start::Function; rank::Union{Nothing, Int} =
     props["ended"] = false
     props["exitText"] = ""
     props["rankLabel"] = rank === nothing ? "" : string(rank)
+    props["selected"] = false
+    props["dimmed"] = false
     owner = Ref{Any}(nothing)
     session = start(() -> publish_rows!(owner[]))
     model = QML.JuliaItemModel(session.pane.rows, false)
@@ -377,6 +384,7 @@ function register_functions!(win::WindowState)
     QML.qmlfunction("restartSession", id -> pane_call(restart_session!, win, id, nothing))
     QML.qmlfunction("killMpi", id -> tab_call(tab_id -> kill_mpi!(win, tab_id), win, id, nothing))
     QML.qmlfunction("restartMpi", id -> tab_call(tab_id -> restart_mpi!(win, tab_id), win, id, nothing))
+    QML.qmlfunction("toggleRank", id -> pane_call(view -> toggle_rank_pane!(win, view), win, id, nothing))
     return nothing
 end
 
@@ -644,7 +652,7 @@ end
 # repeats, so that each pane is visible when QML creates it. Pane `i` shows the connection of rank `i - 1`,
 # which the rank labels rely on: the rank comes from each connection's HELLO frame.
 #
-# A restart keeps the panes, their logs and their targets, and gives each pane the connection of the new
+# A restart keeps the panes, their logs, and the targets and selection, and gives each pane the connection of the new
 # job's rank with the same number. Each pane's output from the old job stays, and the new session follows it.
 function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
     for (i, conn) in enumerate(job.ranks)
@@ -670,6 +678,7 @@ function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
             sync_props!(view)
         end
     end
+    sync_selection_props!(mpi)
     set_mpi_status!(win, mpi, :running, "")
     show_selection!(win)
     if fresh
@@ -887,6 +896,51 @@ function route_targets(mpi::MpiTab)
     views = [v for v in mpi.views if v.rank in mpi.targets]
     length(views) == length(mpi.targets) || error("a target rank of this MPI tab has no pane")
     return views
+end
+
+# Select `rank`, which makes it the only target, so that input goes only to its pane. Throws if `rank` is not a
+# rank of the job.
+function select_rank!(mpi::MpiTab, rank::Integer)
+    0 <= rank < mpi.nranks || error("rank $rank is not one of the $(mpi.nranks) ranks of this MPI tab")
+    mpi.selected = Int(rank)
+    mpi.targets = Set([Int(rank)])
+    return nothing
+end
+
+# Clear the selection if `rank` is selected, else select it. Clearing makes every rank a target again, so input
+# goes to all ranks. Selecting one rank while another is selected moves the selection to that rank.
+function toggle_rank!(mpi::MpiTab, rank::Integer)
+    if mpi.selected == Int(rank)
+        mpi.selected = nothing
+        mpi.targets = Set(0:(mpi.nranks - 1))
+    else
+        select_rank!(mpi, rank)
+    end
+    return nothing
+end
+
+# Toggle the selection from the Select button of the rank pane `view`. Throws if `view` is not a rank pane
+# of an MPI tab.
+function toggle_rank_pane!(win::WindowState, view::TabView)
+    mpi = mpi_tab_of(win, view)
+    mpi === nothing && error("pane $(view.id) is not a rank pane of an MPI tab, so it has no rank to select")
+    toggle_rank!(mpi, view.rank)
+    sync_selection_props!(mpi)
+    return nothing
+end
+
+# Set the properties that QML reads for the selection. `selected` is true for the pane of the rank in
+# `mpi.selected`, which shows its Select button as selected. `dimmed` is true for a pane that does not receive
+# input from the focused pane (see `route_targets`).
+function sync_selection_props!(mpi::MpiTab)
+    receivers = Set(v.rank for v in route_targets(mpi))
+    for view in mpi.views
+        selected = view.rank == mpi.selected
+        selected == view.props["selected"] || (view.props["selected"] = selected)
+        dimmed = !(view.rank in receivers)
+        dimmed == view.props["dimmed"] || (view.props["dimmed"] = dimmed)
+    end
+    return nothing
 end
 
 # Deliver input from the focused pane `view`, by calling `send(target)` for each pane that receives it.

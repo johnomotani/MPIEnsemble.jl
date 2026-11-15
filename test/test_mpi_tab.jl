@@ -313,6 +313,208 @@ end
     end
 end
 
+@testset "MPI tab: selecting a rank sets the targets, and toggling clears the selection" begin
+    mpi = MT_GUI.MpiTab(3)
+    @test isempty(mpi.targets)
+    @test mpi.selected === nothing
+    MT_GUI.select_rank!(mpi, 2)
+    @test mpi.targets == Set([2])
+    @test mpi.selected == 2
+    # Selecting another rank moves the selection.
+    MT_GUI.select_rank!(mpi, 0)
+    @test mpi.targets == Set([0])
+    @test mpi.selected == 0
+    # Toggling the selected rank clears the selection, so every rank is a target; toggling another rank
+    # selects it alone.
+    MT_GUI.toggle_rank!(mpi, 0)
+    @test mpi.targets == Set(0:2)
+    @test mpi.selected === nothing
+    MT_GUI.toggle_rank!(mpi, 1)
+    @test mpi.targets == Set([1])
+    @test mpi.selected == 1
+    MT_GUI.toggle_rank!(mpi, 1)
+    @test mpi.targets == Set(0:2)
+    @test mpi.selected === nothing
+    # A rank that is not one of the job's ranks is an error, and leaves the targets as they were.
+    @test_throws "rank 3 is not one of the 3 ranks of this MPI tab" MT_GUI.select_rank!(mpi, 3)
+    @test_throws "rank -1 is not one of the 3 ranks of this MPI tab" MT_GUI.toggle_rank!(mpi, -1)
+    @test mpi.targets == Set(0:2)
+    @test mpi.selected === nothing
+end
+
+@testset "MPI tab: a Select button sends keys and pastes only to its rank" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            # The pane of rank 2 is the third in rank order.
+            @test [v.rank for v in mpi.views] == [0, 1, 2]
+            two = mpi.views[3]
+            @test mpi.selected === nothing
+            @test [v.props["selected"] for v in mpi.views] == [false, false, false]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, false, false]
+
+            MT_GUI.toggle_rank_pane!(win, two)
+            @test mpi.selected == 2
+            @test mpi.targets == Set([2])
+            @test [v.props["selected"] for v in mpi.views] == [false, false, true]
+            @test [v.props["dimmed"] for v in mpi.views] == [true, true, false]
+
+            # A key from rank 0's pane, which is not a target, is not sent by that pane, and reaches rank 2 only.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "only-two", 0) === false
+            @test MT_GUI.key_input!(win, two, 0, "two-key", 0) === true
+            mt_run_until(() -> occursin("only-two", mt_text(two)) && occursin("two-key", mt_text(two)), win)
+            # A paste from rank 1's pane reaches rank 2 only.
+            @test MT_GUI.paste_input!(win, mpi.views[2], "two-paste") === false
+            mt_run_until(() -> occursin("two-paste", mt_text(two)), win)
+            for other in mpi.views[1:2]
+                @test !occursin("only-two", mt_text(other))
+                @test !occursin("two-key", mt_text(other))
+                @test !occursin("two-paste", mt_text(other))
+            end
+
+            # Toggling the selected rank again sends input to every rank, and clears the dimming.
+            MT_GUI.toggle_rank_pane!(win, two)
+            @test mpi.targets == Set(0:2)
+            @test [v.props["selected"] for v in mpi.views] == [false, false, false]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, false, false]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "all-again", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "all-again"), win)
+
+            # A Select button on another pane moves the selection to that pane.
+            MT_GUI.toggle_rank_pane!(win, mpi.views[1])
+            @test mpi.targets == Set([0])
+            @test [v.props["selected"] for v in mpi.views] == [true, false, false]
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: the selected rank survives a restart" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            MT_GUI.toggle_rank_pane!(win, mpi.views[3])
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            @test mpi.targets == Set([2])
+            @test [v.props["selected"] for v in mpi.views] == [false, false, true]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "after-restart", 0) === false
+            mt_run_until(() -> occursin("after-restart", mt_text(mpi.views[3])), win)
+            @test !occursin("after-restart", mt_text(mpi.views[1]))
+            @test !occursin("after-restart", mt_text(mpi.views[2]))
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a one-rank job starts unselected, and its Select button toggles the selection" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 1; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            view = only(mpi.views)
+
+            # The only rank is the only target, but no rank is selected, so nothing is shown as selected or dimmed.
+            @test mpi.targets == Set([0])
+            @test mpi.selected === nothing
+            @test view.props["selected"] == false
+            @test view.props["dimmed"] == false
+
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test mpi.selected == 0
+            @test mpi.targets == Set([0])
+            @test view.props["selected"] == true
+            @test view.props["dimmed"] == false
+
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test mpi.selected === nothing
+            @test mpi.targets == Set([0])
+            @test view.props["selected"] == false
+            @test view.props["dimmed"] == false
+
+            # Input reaches the rank whether or not it is selected.
+            @test MT_GUI.key_input!(win, view, 0, "one-rank", 0) === true
+            mt_run_until(() -> occursin("one-rank", mt_text(view)), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a one-rank selection survives a restart" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 1; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            view = only(mpi.views)
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            @test mpi.selected == 0
+            @test mpi.targets == Set([0])
+            @test view.props["selected"] == true
+            @test view.props["dimmed"] == false
+
+            # Toggling after the restart clears the selection, as before it.
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test mpi.selected === nothing
+            @test view.props["selected"] == false
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a Select button on a REPL tab's pane is an error" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            # No MPI tab is opened here, so the REPL tab is the window's only tab.
+            MT_GUI.new_tab!(win)
+            repl = win.tabs.tabs[1].state
+            @test MT_GUI.mpi_tab_of(win, repl) === nothing
+            @test_throws "is not a rank pane of an MPI tab" MT_GUI.toggle_rank_pane!(win, repl)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
 @testset "REPL tab: key presses and pastes reach only its own pane" begin
     mt_with() do
         win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)

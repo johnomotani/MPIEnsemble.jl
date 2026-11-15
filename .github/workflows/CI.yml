@@ -45,3 +45,32 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
 
       - uses: julia-actions/julia-runtest@v1
+
+      # The tests run the wrapper with the Python from Python_jll, which must not depend on a system Python.
+      # The runner image has python3 on PATH, so the suite runs again with PATH holding only the tools the
+      # tests use, and the step fails if any Python interpreter is on that PATH.
+      - name: Run the tests without a system Python
+        run: |
+          set -euo pipefail
+
+          restricted=$(mktemp -d "$RUNNER_TEMP/restricted-path.XXXXXX")
+          for tool in julia sh setsid setpriv sleep seq cat sed dd stty; do
+            src=$(type -P "$tool") || { echo "::error::'$tool' is not on PATH"; exit 1; }
+            ln -s "$src" "$restricted/$tool"
+          done
+
+          python_found=""
+          for name in python python3 python3.12; do
+            if p=$(PATH="$restricted" type -P "$name"); then python_found="$python_found $p"; fi
+          done
+          for p in "$restricted"/python*; do
+            if [ -e "$p" ] || [ -L "$p" ]; then python_found="$python_found $p"; fi
+          done
+          if [ -n "$python_found" ]; then
+            echo "::error::a Python interpreter is on the restricted PATH:$python_found"
+            exit 1
+          fi
+
+          PATH="$restricted"
+          export PATH
+          julia --project=. --check-bounds=yes -e 'using Pkg; Pkg.test()'

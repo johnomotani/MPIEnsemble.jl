@@ -15,11 +15,11 @@ include("KeyMap.jl")
 include("VTParse.jl")
 include("LineLog.jl")
 include("PtyOutput.jl")
+include("MpiLauncher.jl")
 include("ReplSession.jl")
 include("PaneModel.jl")
 include("ReplPane.jl")
 include("TabSet.jl")
-include("MpiLauncher.jl")
 
 const GUI_FILE = joinpath(@__DIR__, "Gui.jl")
 

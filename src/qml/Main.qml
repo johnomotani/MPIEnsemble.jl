@@ -14,6 +14,10 @@ import jlqml
 //
 // ApplicationWindow places the menu bar above the window contents, so the tab bar is anchored to the
 // top of the contents.
+//
+// The MPI tab has a Kill MPI button, which is enabled while the job can be killed. It opens KillDialog,
+// which asks for confirmation; Julia then kills the job, and the rank panes keep their output. Once the
+// job has ended, a Restart MPI button starts it again in the same panes.
 Controls.ApplicationWindow {
     id: win
     width: 960
@@ -36,6 +40,12 @@ Controls.ApplicationWindow {
     // Asks for the rank count when Julia has none. The dialog reports its answer to Julia.
     RankDialog {
         id: rankDialog
+    }
+
+    // Asks for confirmation before the MPI job is killed. It is opened by the Kill MPI button.
+    KillDialog {
+        id: killDialog
+        tabId: mpiProps.tabId
     }
 
     Component.onCompleted: {
@@ -249,21 +259,96 @@ Controls.ApplicationWindow {
 
             onVisibleChanged: focusCurrent()
 
+            // Shown in place of the rank panes until the job has started. A failed launch keeps it.
             Text {
                 x: 24
                 width: mpiTab.width - 48
                 y: (mpiTab.height - height) / 2
-                visible: mpiProps.status !== "running"
+                visible: !mpiProps.panes
                 text: mpiProps.message
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
-                color: mpiProps.status === "failed" ? "#f7768e" : "#c0caf5"
+                color: mpiProps.messageFailed ? "#f7768e" : "#c0caf5"
                 font.pixelSize: 16
             }
 
+            // Above the grid: the state of the job, and the button for the next step, which is Kill MPI while the
+            // job can be killed and Restart MPI once it has ended or was killed.
+            Item {
+                id: mpiBar
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 36
+                visible: mpiProps.panes
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    // Leaves room for the buttons, which are at most 112 pixels wide and 12 pixels from the note.
+                    anchors.rightMargin: 124
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: mpiProps.message
+                    elide: Text.ElideRight
+                    color: mpiProps.messageFailed || mpiProps.status === "killed" ? "#f7768e" : "#a9b1d6"
+                    font.pixelSize: 13
+                }
+
+                Controls.Button {
+                    id: killButton
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: mpiProps.killable
+                    text: "Kill MPI"
+                    implicitWidth: 96
+                    implicitHeight: 28
+                    onClicked: killDialog.open()
+
+                    contentItem: Text {
+                        text: killButton.text
+                        color: "#c0caf5"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        font.pixelSize: 13
+                    }
+                    background: Rectangle {
+                        radius: 3
+                        color: killButton.down ? "#5c2531" : "#7a2e3f"
+                        border.color: "#292e42"
+                    }
+                }
+
+                Controls.Button {
+                    id: restartButton
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: mpiProps.status === "killed" || mpiProps.status === "ended"
+                    text: "Restart MPI"
+                    implicitWidth: 112
+                    implicitHeight: 28
+                    onClicked: Julia.restartMpi(mpiProps.tabId)
+
+                    contentItem: Text {
+                        text: restartButton.text
+                        color: "#c0caf5"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        font.pixelSize: 13
+                    }
+                    background: Rectangle {
+                        radius: 3
+                        color: restartButton.down ? "#1f2335" : "#292e42"
+                        border.color: "#292e42"
+                    }
+                }
+            }
+
             GridLayout {
-                anchors.fill: parent
-                visible: mpiProps.status === "running"
+                anchors.top: mpiBar.bottom
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                visible: mpiProps.panes
                 columns: mpiProps.columns
                 rowSpacing: 8
                 columnSpacing: 8

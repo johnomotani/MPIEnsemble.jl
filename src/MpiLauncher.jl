@@ -6,8 +6,8 @@ module MpiLauncher
 import MPIPreferences
 using Sockets: listen, accept
 
-export Frame, Job, RankConnection, FrameDecoder, encode_frame, decode!, launch, shutdown!,
-    take_frame!, send_input!, send_resize!, send_interrupt!, exit_status, mpiexec_command, python_executable
+export Frame, Job, RankConnection, FrameDecoder, encode_frame, decode!, launch, shutdown!, kill!,
+    take_frame!, is_closing, send_input!, send_resize!, send_interrupt!, exit_status, mpiexec_command, python_executable
 
 const T_DATA = 0x01
 const T_RESIZE = 0x02
@@ -324,10 +324,19 @@ end
     take_frame!(conn) -> Frame
 
 Wait for the next DATA or EXIT frame from the rank. Throws the error that ended the connection if the
-wrapper's socket closed without an EXIT frame. After an EXIT frame has been taken, the connection gives no
-more frames, and this throws an `InvalidStateException`.
+wrapper's socket closed without an EXIT frame. After an EXIT frame has been taken, or once the connection is
+closing (see `is_closing`) and its frames are used up, the connection gives no more frames, and this throws
+an `InvalidStateException`.
 """
 take_frame!(conn::RankConnection) = take!(conn.frames)
+
+"""
+    is_closing(conn) -> Bool
+
+Whether the connection was closed by the launcher, by `shutdown!` or `kill!`. The socket's end of stream is
+then expected, and it is not an error.
+"""
+is_closing(conn::RankConnection) = conn.closing
 
 function send_frame!(conn::RankConnection, type::UInt8, payload::AbstractVector{UInt8})
     bytes = encode_frame(type, payload)
@@ -421,7 +430,8 @@ function read_hello(socket::IO, events::Channel)
 end
 
 # Read the frames of one rank into its channel until its EXIT frame. Closing the socket without an EXIT
-# frame closes the channel with an error, which `take_frame!` throws.
+# frame closes the channel with an error, which `take_frame!` throws, unless the connection is closing, in
+# which case the channel is closed without an error.
 function read_frames(conn::RankConnection, decoder::FrameDecoder)
     try
         while true
@@ -444,8 +454,11 @@ function read_frames(conn::RankConnection, decoder::FrameDecoder)
             end
         end
     catch e
-        # Closing the socket during shutdown ends the reader; any other failure is passed on.
-        if !conn.closing && isopen(conn.frames)
+        # Reading a socket that the launcher closed fails; that ends the reader without an error. Any other
+        # failure is passed on.
+        if conn.closing
+            isopen(conn.frames) && close(conn.frames)
+        elseif isopen(conn.frames)
             close(conn.frames, e)
         end
     end
@@ -507,6 +520,27 @@ function connect_ranks(server, process::Base.Process, nranks::Integer, timeout::
         push!(connections, conn)
     end
     return connections
+end
+
+"""
+    kill!(job)
+
+Stop the job at once, without waiting for its ranks to exit. The launcher's process group is killed with
+SIGKILL, which stops the launcher and the wrappers, and every process that stayed in that group. Each
+connection is marked as closing first, so its reader ends without an error. Output already received is still
+returned by `take_frame!`. The socket directory is removed. Calling this on a job whose launcher has already
+exited only closes the connections and removes the directory.
+"""
+function kill!(job::Job)
+    for conn in job.ranks
+        conn.closing = true
+    end
+    kill_process_group!(job.process)
+    for conn in job.ranks
+        isopen(conn.socket) && close(conn.socket)
+    end
+    rm(job.directory; recursive = true, force = true)
+    return nothing
 end
 
 """

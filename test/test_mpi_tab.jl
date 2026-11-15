@@ -624,3 +624,574 @@ end
     end
     @test mt_fake_processes_gone()
 end
+
+# The processes whose parent is `pid`, read from /proc.
+function mt_children(pid::Integer)
+    found = Int[]
+    for entry in readdir("/proc")
+        all(isdigit, entry) || continue
+        stat = try
+            read("/proc/$entry/stat", String)
+        catch
+            continue
+        end
+        # The command name is in parentheses and may contain spaces. The state comes first, then the parent.
+        fields = split(stat[(findlast(')', stat) + 1):end])
+        parse(Int, fields[2]) == pid && push!(found, parse(Int, entry))
+    end
+    return found
+end
+
+@testset "MPI tab: killing the job ends every rank, and each pane keeps its output" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            @test MT_GUI.send_bytes!(mpi.views[2], Vector{UInt8}(codeunits("before-kill"))) === true
+            mt_run_until(() -> occursin("before-kill", mt_text(mpi.views[2])), win)
+            @test MT_GUI.mpi_killable(mpi)
+            @test win.mpi_props["killable"] == true
+
+            pids = [v.session.repl.source.connection.pid for v in mpi.views]
+            job_process = mpi.job.process
+            ids = [v.id for v in mpi.views]
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+
+            @test mpi.status === :killed
+            @test mpi.failure === nothing
+            @test win.mpi_props["status"] == "killed"
+            @test win.mpi_props["killable"] == false
+            @test !MT_GUI.mpi_killable(mpi)
+            @test process_exited(job_process)
+            @test timedwait(() -> all(!mt_exists(p) for p in pids), 10; pollint = 0.05) === :ok
+            @test mt_fake_processes_gone()
+
+            # Every rank reports that it ended. No exit status came from the ranks, so none is recorded.
+            for view in mpi.views
+                @test view.killed
+                @test view.session.repl.exit === nothing
+                @test !MT_ReplSession.has_ended(view.session.repl)
+                @test view.props["ended"] == true
+                @test view.props["exitText"] ==
+                    "Rank $(view.rank) ended: the MPI job was killed. Restarting needs the whole MPI job to restart."
+                @test view.failure === nothing
+            end
+
+            # The panes stay in the tab, with their output, which is still fed after the kill.
+            @test [v.id for v in mt_rank_panes(win)] == ids
+            @test all(haskey(win.views, id) for id in ids)
+            for _ in 1:20
+                MT_GUI.service!(win)
+                sleep(0.005)
+            end
+            @test win.failure === nothing
+            @test occursin("before-kill", mt_text(mpi.views[2]))
+            @test occursin("resize 25 100", mt_text(mpi.views[1]))
+            @test !occursin("before-kill", mt_text(mpi.views[1]))
+
+            # Input is refused by every pane, and nothing is raised.
+            @test MT_GUI.send_bytes!(mpi.views[1], Vector{UInt8}(codeunits("after-kill"))) === false
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "after-kill", 0) === false
+            @test MT_GUI.paste_input!(win, mpi.views[3], "after-kill") === false
+            @test win.failure === nothing
+
+            # Killing again does nothing, and the state is unchanged.
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test mpi.status === :killed
+            @test all(v.killed for v in mpi.views)
+
+            # Closing the killed tab removes its panes; the job has nothing left to stop.
+            MT_GUI.close_tab!(win, tab.id)
+            @test isempty(win.tabs.tabs)
+            @test isempty(mt_rank_panes(win))
+            @test process_exited(job_process)
+            @test mt_fake_processes_gone()
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: killing the job stops the Julia of each rank" begin
+    # The ranks run the real wrapper, which runs julia in a pseudo-terminal of its own. Each rank's julia must
+    # stop when its job is killed, not only the launcher and the wrappers.
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = (launcher = MT_FAKE_LAUNCHER, timeout = MT_TIMEOUT))
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            panes = mt_rank_panes(win)
+            for view in panes
+                @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("println(\"up-\", ENV[\"OMPI_COMM_WORLD_RANK\"])\r"))) === true
+            end
+            mt_run_until(() -> all(occursin("up-$(v.rank)", mt_text(v)) for v in panes), win; timeout = 120)
+
+            wrappers = [v.session.repl.source.connection.pid for v in panes]
+            julias = reduce(vcat, mt_children.(wrappers); init = Int[])
+            @test length(julias) == length(wrappers)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test timedwait(() -> all(!mt_exists(p) for p in vcat(wrappers, julias)), 30; pollint = 0.05) === :ok
+            @test mt_fake_processes_gone()
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: a job can be killed only once it has started, and a REPL tab is not an MPI job" begin
+    mt_with(mode = "silent") do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.new_tab!(win)
+            repl_id = win.tabs.tabs[1].id
+            @test_throws "is not an MPI tab" MT_GUI.kill_mpi!(win, repl_id)
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            # The job is still starting, so there is nothing to kill yet.
+            @test mpi.status === :starting
+            @test !MT_GUI.mpi_killable(mpi)
+            @test win.mpi_props["killable"] == false
+            @test_throws "cannot be killed while it is starting" MT_GUI.kill_mpi!(win, tab.id)
+            @test mpi.status === :starting
+            @test win.failure === nothing
+            MT_GUI.close_tab!(win, tab.id)
+            @test mt_fake_processes_gone()
+            # A kill for a tab that has been closed does nothing, and raises nothing.
+            @test MT_GUI.tab_call(id -> MT_GUI.kill_mpi!(win, id), win, tab.id, :closed) === :closed
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    mt_with(mode = "no_exit@0") do
+        # Rank 0's connection closes without an EXIT frame. Its job may still be running, so it stays killable.
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> mpi.views[1].failure !== nothing, win)
+            @test MT_GUI.mpi_killable(mpi)
+            MT_GUI.close_tab!(win, tab.id)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    mt_with(mode = "silent") do
+        # The launch fails: the job cannot be killed, and the tab says so.
+        win = MT_GUI.WindowState("", nothing, 2;
+            launch_options = (launcher = Cmd(["/nonexistent/mpiexec-for-tests"]), wrapper = MT_FAKE_WRAPPER, timeout = 5))
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            redirect_stderr(devnull) do
+                mt_run_until(() -> mpi.status !== :starting, win)
+            end
+            @test mpi.status === :failed
+            @test !MT_GUI.mpi_killable(mpi)
+            @test_throws "cannot be killed while it is failed" MT_GUI.kill_mpi!(win, tab.id)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: a rank that ended before the kill keeps its own exit status" begin
+    # Rank 0 ends on its own at once, and rank 1 keeps running, so the job can still be killed.
+    mt_with(mode = "exit_frame@0") do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            ended = only(v for v in mpi.views if v.rank == 0)
+            running = only(v for v in mpi.views if v.rank == 1)
+            mt_run_until(() -> MT_ReplSession.has_ended(ended.session.repl), win)
+            @test MT_GUI.mpi_killable(mpi)
+            text = ended.props["exitText"]
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test mpi.status === :killed
+            @test !ended.killed
+            @test running.killed
+            @test ended.props["exitText"] == text
+            @test ended.session.repl.exit == MT_ReplSession.ExitInfo(7, 0)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: a rank whose connection failed before the kill keeps the failure in its pane" begin
+    mt_with(mode = "no_exit@1") do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            failing = only(v for v in mpi.views if v.rank == 1)
+            other = only(v for v in mpi.views if v.rank == 0)
+            mt_run_until(() -> failing.failure !== nothing, win)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test failing.killed
+            @test failing.props["exitText"] == "Rank 1 failed: " * sprint(showerror, failing.failure)
+            @test other.props["exitText"] ==
+                "Rank 0 ended: the MPI job was killed. Restarting needs the whole MPI job to restart."
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+# The restart entries of a pane's log: the text that describes how each earlier session ended.
+mt_restart_texts(view) =
+    [e.text for e in MT_LL.window(view.session.log, 1:length(view.session.log)) if e.kind === :restart]
+
+# The processes of the fake job of `view`'s rank: its wrapper, which is alive while the connection is open.
+mt_wrapper_pids(views) = [v.session.repl.source.connection.pid for v in views]
+
+@testset "MPI tab: restart after a kill keeps each pane's output, and the new job's output follows it" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            @test MT_GUI.send_bytes!(mpi.views[2], Vector{UInt8}(codeunits("before-kill"))) === true
+            mt_run_until(() -> occursin("before-kill", mt_text(mpi.views[2])), win)
+
+            ids = [v.id for v in mpi.views]
+            old_job = mpi.job
+            old_directory = old_job.directory
+            old_pids = mt_wrapper_pids(mpi.views)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test mpi.status === :killed
+            @test win.mpi_props["killable"] == false
+
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            @test mpi.status === :starting
+            @test win.mpi_props["status"] == "starting"
+            @test win.mpi_props["message"] == "Restarting 3 MPI ranks…"
+            mt_run_until(() -> mpi.status !== :starting, win)
+            @test mpi.status === :running
+            @test mpi.failure === nothing
+            @test win.mpi_props["status"] == "running"
+            @test win.mpi_props["killable"] == true
+            @test win.failure === nothing
+
+            # The same panes, in the same order, with the ranks of the new job.
+            @test [v.id for v in mpi.views] == ids
+            @test [v.id for v in mt_rank_panes(win)] == ids
+            @test [v.rank for v in mpi.views] == [0, 1, 2]
+            @test [v.session.repl.source.connection.rank for v in mpi.views] == [0, 1, 2]
+            @test mpi.job !== old_job
+            new_pids = mt_wrapper_pids(mpi.views)
+            @test isempty(intersect(old_pids, new_pids))
+            @test all(!v.killed && v.failure === nothing for v in mpi.views)
+            @test all(v.props["ended"] == false && v.props["exitText"] == "" for v in mpi.views)
+            @test all(v.session.visible for v in mpi.views)
+            @test mpi.targets == Set(0:2)
+
+            # The old job has been shut down: its launcher and wrappers have exited, and its socket directory is gone.
+            @test process_exited(old_job.process)
+            @test !isdir(old_directory)
+            @test timedwait(() -> all(!mt_exists(p) for p in old_pids), 10; pollint = 0.05) === :ok
+
+            # Each pane logs the end of its old session, and the old output is still there.
+            for view in mpi.views
+                @test mt_restart_texts(view) == [MT_ReplSession.UNEXITED_DESCRIPTION]
+            end
+            @test occursin("before-kill", mt_text(mpi.views[2]))
+
+            # The new session writes after the old output, and the pane shows the new output.
+            for view in mpi.views
+                @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("after-restart"))) === true
+            end
+            mt_run_until(() -> mt_all_show(mpi.views, "after-restart"), win)
+            for view in mpi.views
+                text = mt_text(view)
+                restart_at = findfirst(MT_ReplSession.UNEXITED_DESCRIPTION, text)
+                @test restart_at !== nothing
+                @test findfirst("resize 25 100", text).start < restart_at.start
+                @test findnext("resize 25 100", text, restart_at.stop + 1) !== nothing
+                @test restart_at.stop < findfirst("after-restart", text).start
+            end
+            @test occursin("before-kill", mt_text(mpi.views[2]))
+            @test !occursin("before-kill", mt_text(mpi.views[1]))
+            @test win.failure === nothing
+
+            new_directory = mpi.job.directory
+            @test MT_GUI.close_tab!(win, tab.id) === nothing
+            @test isempty(win.tabs.tabs)
+            @test isempty(mt_rank_panes(win))
+            @test !isdir(new_directory)
+            @test mt_fake_processes_gone()
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: restart after every rank ended on its own" begin
+    # Each rank exits when it reads "exit", as Julia does when it is asked to exit. No rank is killed.
+    mt_with(mode = "exit_on_input") do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            @test MT_GUI.send_bytes!(mpi.views[1], Vector{UInt8}(codeunits("before-stop"))) === true
+            mt_run_until(() -> occursin("before-stop", mt_text(mpi.views[1])), win)
+
+            old_directory = mpi.job.directory
+            old_pids = mt_wrapper_pids(mpi.views)
+            for view in mpi.views
+                @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("exit"))) === true
+            end
+            mt_run_until(() -> mpi.status === :ended, win)
+            @test all(MT_ReplSession.has_ended(v.session.repl) for v in mpi.views)
+            @test all(v.session.repl.exit == MT_ReplSession.ExitInfo(0, 0) for v in mpi.views)
+            @test win.mpi_props["status"] == "ended"
+            @test win.mpi_props["message"] == "The MPI job has ended."
+            @test win.mpi_props["messageFailed"] == false
+            @test win.mpi_props["killable"] == false
+            @test !MT_GUI.mpi_killable(mpi)
+            @test_throws "cannot be killed while it is ended" MT_GUI.kill_mpi!(win, tab.id)
+            @test all(v.props["ended"] == true for v in mpi.views)
+            @test all(v.props["exitText"] == "Rank $(v.rank) ended: Julia exited with code 0. " *
+                "Restarting needs the whole MPI job to restart." for v in mpi.views)
+            # Input is refused by the ended ranks.
+            @test MT_GUI.send_bytes!(mpi.views[2], Vector{UInt8}(codeunits("after-end"))) === false
+
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            @test win.failure === nothing
+            @test !isdir(old_directory)
+            @test timedwait(() -> all(!mt_exists(p) for p in old_pids), 10; pollint = 0.05) === :ok
+            @test all(!MT_ReplSession.has_ended(v.session.repl) for v in mpi.views)
+            @test all(v.props["ended"] == false for v in mpi.views)
+            for view in mpi.views
+                @test mt_restart_texts(view) == ["Julia exited with code 0"]
+            end
+            @test occursin("before-stop", mt_text(mpi.views[1]))
+
+            # The new job takes input, and the ranks end again when asked, so it can be restarted again.
+            for view in mpi.views
+                @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("second-job"))) === true
+            end
+            mt_run_until(() -> mt_all_show(mpi.views, "second-job"), win)
+            for view in mpi.views
+                @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("exit"))) === true
+            end
+            mt_run_until(() -> mpi.status === :ended, win)
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            @test all(length(mt_restart_texts(v)) == 2 for v in mpi.views)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: restart is refused while the job runs or starts, and for a REPL tab" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.new_tab!(win)
+            repl_id = win.tabs.tabs[1].id
+            @test_throws "is not an MPI tab" MT_GUI.restart_mpi!(win, repl_id)
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            @test_throws "cannot be restarted while it is starting" MT_GUI.restart_mpi!(win, tab.id)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            @test_throws "cannot be restarted while it is running" MT_GUI.restart_mpi!(win, tab.id)
+            @test mpi.status === :running
+            @test all(!MT_ReplSession.has_ended(v.session.repl) for v in mpi.views)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+    mt_with(mode = "silent") do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            @test_throws "cannot be restarted while it is starting" MT_GUI.restart_mpi!(win, tab.id)
+            MT_GUI.close_tab!(win, tab.id)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: kill, restart and kill again, each time leaving no processes or directories" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            directories = String[]
+            for round in 1:3
+                push!(directories, mpi.job.directory)
+                pids = mt_wrapper_pids(mpi.views)
+                @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+                @test mpi.status === :killed
+                @test timedwait(() -> all(!mt_exists(p) for p in pids), 10; pollint = 0.05) === :ok
+                @test !isdir(directories[end])
+                @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+                mt_run_until(() -> mpi.status === :running, win)
+                @test MT_GUI.send_bytes!(mpi.views[1], Vector{UInt8}(codeunits("round-$round"))) === true
+                mt_run_until(() -> occursin("round-$round", mt_text(mpi.views[1])), win)
+            end
+            @test all(length(mt_restart_texts(v)) == 3 for v in mpi.views)
+            @test all(occursin("round-$r", mt_text(mpi.views[1])) for r in 1:3)
+            @test win.failure === nothing
+            MT_GUI.close_tab!(win, tab.id)
+            @test mt_fake_processes_gone()
+            @test all(!isdir(d) for d in directories)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: a restarted job's panes take input, and zoom and targets still route it" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            # Every rank receives input from the focused pane, as before the restart.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "all-after", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "all-after"), win)
+
+            # A zoomed rank alone receives input. The pane of rank 2 is the focused one here, since a pane that
+            # does not receive input reports that its key was not sent.
+            mpi.zoomed = 2
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [2]
+            @test MT_GUI.key_input!(win, mpi.views[3], 0, "zoom-two", 0) === true
+            mt_run_until(() -> occursin("zoom-two", mt_text(mpi.views[3])), win)
+            @test !occursin("zoom-two", mt_text(mpi.views[1]))
+            @test !occursin("zoom-two", mt_text(mpi.views[2]))
+            mpi.zoomed = nothing
+
+            # Only the ranks in targets receive input.
+            mpi.targets = Set([0, 2])
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0, 2]
+            @test MT_GUI.key_input!(win, mpi.views[3], 0, "two-only", 0) === true
+            mt_run_until(() -> occursin("two-only", mt_text(mpi.views[3])), win)
+            @test !occursin("two-only", mt_text(mpi.views[2]))
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a failed restart keeps the panes, and a second restart succeeds" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            @test MT_GUI.send_bytes!(mpi.views[1], Vector{UInt8}(codeunits("before-failure"))) === true
+            mt_run_until(() -> occursin("before-failure", mt_text(mpi.views[1])), win)
+            ids = [v.id for v in mpi.views]
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+
+            # The next job's wrappers report a job of another size, so its launch fails.
+            withenv("FAKE_WRAPPER_MODE" => "wrong_size") do
+                redirect_stderr(devnull) do
+                    MT_GUI.restart_mpi!(win, tab.id)
+                    mt_run_until(() -> mpi.status !== :starting, win)
+                end
+            end
+            @test mpi.status === :ended
+            @test mpi.job === nothing
+            @test mpi.failure === nothing
+            @test occursin("Could not restart 2 MPI ranks", win.mpi_props["message"])
+            @test win.mpi_props["messageFailed"] == true
+            @test win.mpi_props["panes"] == true
+            @test win.mpi_props["killable"] == false
+            @test [v.id for v in mt_rank_panes(win)] == ids
+            @test occursin("before-failure", mt_text(mpi.views[1]))
+            @test win.failure === nothing
+
+            # Restart again with the normal wrappers, which succeeds.
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            @test win.mpi_props["messageFailed"] == false
+            @test all(mt_restart_texts(v) == [MT_ReplSession.UNEXITED_DESCRIPTION] for v in mpi.views)
+            @test MT_GUI.send_bytes!(mpi.views[2], Vector{UInt8}(codeunits("works"))) === true
+            mt_run_until(() -> occursin("works", mt_text(mpi.views[2])), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a rank whose connection failed gets a new connection after a restart" begin
+    mt_with(mode = "no_exit@0") do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            failed = only(v for v in mpi.views if v.rank == 0)
+            mt_run_until(() -> failed.failure !== nothing, win)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test failed.killed
+            withenv("FAKE_WRAPPER_MODE" => "echo") do
+                @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+                mt_run_until(() -> mpi.status === :running, win)
+            end
+            @test failed.failure === nothing
+            @test !failed.killed
+            @test MT_GUI.send_bytes!(failed, Vector{UInt8}(codeunits("rank-zero"))) === true
+            mt_run_until(() -> occursin("rank-zero", mt_text(failed)), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end

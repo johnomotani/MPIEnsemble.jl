@@ -52,7 +52,8 @@ const RANK_COLS = 80
 The QML objects of one pane: the pane's rows as a model, and the properties that QML reads. `id` is the
 pane's id, which QML uses in calls. `rank` is the MPI rank that the pane shows, or `nothing` for the pane of
 a REPL tab. `ended_shown` is the ended state last reported in the tab bar (REPL tabs only). `failure` is the
-error that stopped the pane's rank connection, or `nothing`.
+error that stopped the pane's rank connection, or `nothing`. `killed` is true when the rank's job was killed
+from the window while the rank had not ended (see `kill_mpi!`).
 """
 mutable struct TabView
     const id::Int
@@ -62,14 +63,18 @@ mutable struct TabView
     const rank::Union{Nothing, Int}
     ended_shown::Bool
     failure::Any
+    killed::Bool
 end
 
 """
     MpiTab(nranks)
 
 The state of an MPI tab. `views` holds one pane per rank, in rank order, once the job has started.
-`status` is `:starting`, `:running` or `:failed`, and `failure` holds the message of a failed start.
-`job` is the running launcher, and `task` is the task that starts it. `result` is what that task produced:
+`status` is `:starting`, `:running`, `:ended`, `:killed` or `:failed`, and `failure` holds the message of a
+failed start. `:ended` means every rank has ended on its own, or a restart failed after the previous job
+ended; `:killed` means the job was killed. Both can be restarted (see `restart_mpi!`). `job` is the
+launcher of the job, and `task` is the task that starts it. A job that has been killed or has ended
+keeps its `job` until it is restarted or the tab is closed. `result` is what that task produced:
 the job, or the error that stopped the launch, or `nothing` while the launch is in progress. The event loop
 turns the result into panes and state (see `finish_launch!`), so the task itself never touches the window.
 `offset` is where the fair drain of the rank panes starts next time (see `TabSet.drain_fairly!`).
@@ -134,6 +139,10 @@ function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, In
     mpi_props["status"] = ""
     mpi_props["message"] = ""
     mpi_props["columns"] = 1
+    mpi_props["tabId"] = 0
+    mpi_props["killable"] = false
+    mpi_props["panes"] = false
+    mpi_props["messageFailed"] = false
     rows = QML.JuliaItemModel(TabSet.Tab[], false)
     QML.addrole!(rows, "tabId", t -> t.id)
     QML.addrole!(rows, "tabTitle", t -> TabSet.tab_label(t, tab_ended(t)))
@@ -182,7 +191,7 @@ function new_view(win::WindowState, start::Function; rank::Union{Nothing, Int} =
     model = QML.JuliaItemModel(session.pane.rows, false)
     QML.addrole!(model, "html", identity)
     QML.get_julia_data(model).values[] === session.pane.rows || error("the item model does not wrap the pane rows")
-    view = TabView(id, session, model, props, rank, false, nothing)
+    view = TabView(id, session, model, props, rank, false, nothing, false)
     owner[] = view
     win.views[id] = view
     return view
@@ -219,7 +228,7 @@ function sync_props!(view::TabView)
     thumb_top, thumb_size = scrollbar_state(pane)
     thumb_top == p["thumbTop"] || (p["thumbTop"] = thumb_top)
     thumb_size == p["thumbSize"] || (p["thumbSize"] = thumb_size)
-    ended = view.failure !== nothing || has_ended(st.repl)
+    ended = view.failure !== nothing || view.killed || has_ended(st.repl)
     ended == p["ended"] || (p["ended"] = ended)
     exit_text = ended ? end_text(view) : ""
     exit_text == p["exitText"] || (p["exitText"] = exit_text)
@@ -231,10 +240,13 @@ function sync_props!(view::TabView)
 end
 
 # The text of the prompt at the bottom of an ended pane. A rank cannot be restarted on its own, so its
-# text says that its whole job must restart. A rank whose connection failed says so instead.
+# text says that its whole job must restart. A rank whose connection failed says so instead, and a rank
+# whose job was killed says that.
 function end_text(view::TabView)
     view.rank === nothing && return describe_exit(view.session.repl.exit)
     view.failure === nothing || return "Rank $(view.rank) failed: $(sprint(showerror, view.failure))"
+    view.killed && return "Rank $(view.rank) ended: the MPI job was killed. " *
+        "Restarting needs the whole MPI job to restart."
     return "Rank $(view.rank) ended: $(describe_exit(view.session.repl.exit)). " *
         "Restarting needs the whole MPI job to restart."
 end
@@ -295,6 +307,12 @@ after a separator in the output. The output stays visible and selectable while t
 input is ignored.
 
 Each log line is one row of the pane: a line wider than the pane is cut off at its right edge.
+
+The MPI tab has a Kill MPI button while its job can be killed. After confirmation in a dialog, the job is
+killed at once, and each rank that had not ended shows that its job was killed. The rank panes stay in the
+tab with their output, and refuse input. When every rank has ended on its own, or the job was killed, the
+tab offers a Restart MPI button, which starts a new job with the same number of ranks in the same panes.
+Each pane keeps its output, and the new session's output follows it.
 
 An error from a tab's reader or writer task, or from a QML call, is rethrown by this function once the
 window has closed. The error of a rank's connection is shown in that rank's pane and printed to standard
@@ -357,6 +375,8 @@ function register_functions!(win::WindowState)
         pane_call(view -> selection_end_op!(view, p -> select_line!(p, Int(slot))), win, id, nothing))
     QML.qmlfunction("clearSelection", id -> pane_call(view -> selection_op!(view, clear_selection!), win, id, nothing))
     QML.qmlfunction("restartSession", id -> pane_call(restart_session!, win, id, nothing))
+    QML.qmlfunction("killMpi", id -> tab_call(tab_id -> kill_mpi!(win, tab_id), win, id, nothing))
+    QML.qmlfunction("restartMpi", id -> tab_call(tab_id -> restart_mpi!(win, tab_id), win, id, nothing))
     return nothing
 end
 
@@ -427,6 +447,10 @@ function service!(win::WindowState)
     end
     win.offset = TabSet.drain_fairly!((tab, limit) -> feed_tab!(win, tab, limit), win.tabs.tabs,
         LINES_PER_TICK, win.offset)
+    # Ranks end while their output is fed, so whether the job has ended is checked afterwards.
+    for tab in win.tabs.tabs
+        tab.kind === :mpi && update_job_state!(win, tab.state)
+    end
     return nothing
 end
 
@@ -535,6 +559,7 @@ function open_mpi_tab!(win::WindowState)
     win.mpi_opened = true
     mpi = MpiTab(n)
     tab = TabSet.open!(win.tabs, :mpi, mpi)
+    win.mpi_props["tabId"] = tab.id
     win.mpi_props["columns"] = rank_columns(n)
     set_mpi_status!(win, mpi, :starting, "Starting $n MPI ranks…")
     show_selection!(win)
@@ -544,12 +569,38 @@ function open_mpi_tab!(win::WindowState)
 end
 
 # Set the status of an MPI tab and the properties that QML reads for it. `message` is the text shown in
-# the tab while it is not running, and the failure message when it has failed.
-function set_mpi_status!(win::WindowState, mpi::MpiTab, status::Symbol, message::AbstractString)
+# the tab: the note above the rank panes once they exist, or the text in place of them otherwise. It is
+# the failure message when the tab has failed. `is_error` marks a note that reports an error.
+function set_mpi_status!(win::WindowState, mpi::MpiTab, status::Symbol, message::AbstractString;
+        is_error::Bool = false)
     mpi.status = status
     mpi.failure = status === :failed ? String(message) : nothing
     win.mpi_props["status"] = String(status)
     win.mpi_props["message"] = String(message)
+    win.mpi_props["messageFailed"] = is_error || status === :failed
+    update_killable!(win, mpi)
+    return nothing
+end
+
+# A rank can be killed while it has not ended: the job has started, and some rank has neither delivered its
+# exit status nor been killed. A rank whose connection failed may still be running, so it counts as running.
+rank_running(view::TabView) = !view.killed && !has_ended(view.session.repl)
+mpi_killable(mpi::MpiTab) = mpi.status === :running && any(rank_running, mpi.views)
+
+# Set the property that enables the Kill MPI button, when it changes.
+function update_killable!(win::WindowState, mpi::MpiTab)
+    killable = mpi_killable(mpi)
+    killable == win.mpi_props["killable"] || (win.mpi_props["killable"] = killable)
+    return nothing
+end
+
+# The job has ended when it is running and no rank is running: each rank has ended on its own, or was killed.
+# Then the tab says so, and the job can be restarted.
+function update_job_state!(win::WindowState, mpi::MpiTab)
+    if mpi.status === :running && !any(rank_running, mpi.views)
+        set_mpi_status!(win, mpi, :ended, "The MPI job has ended.")
+    end
+    update_killable!(win, mpi)
     return nothing
 end
 
@@ -566,17 +617,24 @@ function start_ranks!(mpi::MpiTab, launch_options::NamedTuple)
     return nothing
 end
 
-# Act on the outcome of an MPI launch, from the event loop, once it is known. A started job gets its panes.
-# An error is shown in the tab and printed to standard error, and the window keeps running.
+# Act on the outcome of an MPI launch, from the event loop, once it is known. A started job gets its panes,
+# or, when it is a restart, the panes that it already has. An error is shown in the tab and printed to
+# standard error, and the window keeps running. A failed restart leaves the panes with their output, and
+# the job can be restarted again.
 function finish_launch!(win::WindowState, mpi::MpiTab)
     mpi.status === :starting || return nothing
     result = mpi.result
     result === nothing && return nothing
     if result isa MpiLauncher.Job
         attach_job!(win, mpi, result)
-    else
+    elseif isempty(mpi.views)
         message = "Could not start $(mpi.nranks) MPI ranks: $(sprint(showerror, result))"
         set_mpi_status!(win, mpi, :failed, message)
+        println(stderr, message)
+    else
+        message = "Could not restart $(mpi.nranks) MPI ranks: $(sprint(showerror, result)). " *
+            "Restart MPI to try again."
+        set_mpi_status!(win, mpi, :ended, message; is_error = true)
         println(stderr, message)
     end
     return nothing
@@ -585,21 +643,97 @@ end
 # Make the panes of a started job. The panes are made visible before they are added to the model that QML
 # repeats, so that each pane is visible when QML creates it. Pane `i` shows the connection of rank `i - 1`,
 # which the rank labels rely on: the rank comes from each connection's HELLO frame.
+#
+# A restart keeps the panes, their logs and their targets, and gives each pane the connection of the new
+# job's rank with the same number. Each pane's output from the old job stays, and the new session follows it.
 function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
-    mpi.job = job
     for (i, conn) in enumerate(job.ranks)
         conn.rank == i - 1 || error("connection $i of the job is for rank $(conn.rank), not rank $(i - 1)")
     end
-    mpi.targets = Set(0:(length(job.ranks) - 1))
-    for conn in job.ranks
-        push!(mpi.views, new_view(win, changed -> ReplPane.State(conn, RANK_ROWS, RANK_COLS; changed);
-            rank = conn.rank))
+    mpi.job = job
+    fresh = isempty(mpi.views)
+    if fresh
+        mpi.targets = Set(0:(length(job.ranks) - 1))
+        for conn in job.ranks
+            push!(mpi.views, new_view(win, changed -> ReplPane.State(conn, RANK_ROWS, RANK_COLS; changed);
+                rank = conn.rank))
+        end
+        win.mpi_props["panes"] = true
+    else
+        length(mpi.views) == length(job.ranks) || error("the restarted job has $(length(job.ranks)) ranks, " *
+            "but the tab has $(length(mpi.views)) panes")
+        for (view, conn) in zip(mpi.views, job.ranks)
+            view.rank == conn.rank || error("the pane of rank $(view.rank) was given the connection of rank $(conn.rank)")
+            view.killed = false
+            view.failure = nothing
+            ReplPane.restart!(view.session, conn; rows = RANK_ROWS, cols = RANK_COLS)
+            sync_props!(view)
+        end
     end
     set_mpi_status!(win, mpi, :running, "")
     show_selection!(win)
-    for view in mpi.views
-        push!(win.rank_panes, view)
+    if fresh
+        for view in mpi.views
+            push!(win.rank_panes, view)
+        end
     end
+    return nothing
+end
+
+"""
+    kill_mpi!(win, id)
+
+Kill the job of the MPI tab `id`, as Kill MPI does after it is confirmed. The launcher and the ranks are
+stopped at once (see `MpiLauncher.kill!`). Each rank that had not ended is marked as killed, and its pane
+says that its job was killed. The panes keep their output and refuse input, and the tab shows the job as
+killed, so that it can be restarted (see `restart_mpi!`). Killing a job that is already killed does nothing.
+A job that has not started, has ended, or whose launch failed, has nothing to kill, and throws. Throws if
+`id` is not an MPI tab.
+"""
+function kill_mpi!(win::WindowState, id::Int)
+    tab = win.tabs.tabs[TabSet.index_of(win.tabs, id)]
+    tab.kind === :mpi || error("tab $id is not an MPI tab, so it has no MPI job to kill")
+    mpi = tab.state
+    mpi.status === :killed && return nothing
+    mpi.status === :running || error("the MPI job of tab $id cannot be killed while it is $(mpi.status)")
+    MpiLauncher.kill!(mpi.job)
+    for view in mpi.views
+        rank_running(view) || continue
+        view.killed = true
+        sync_props!(view)
+    end
+    set_mpi_status!(win, mpi, :killed, "The MPI job was killed.")
+    return nothing
+end
+
+"""
+    restart_mpi!(win, id)
+
+Restart the job of the MPI tab `id` with the same number of ranks, once the job has ended: either every
+rank ended on its own, or the job was killed (see `kill_mpi!`). The old job is shut down first, and its
+socket directory removed, so that the old and the new job never run together. The rank panes are kept, and
+each keeps its output: the new session's output follows it, after a line that says how the old session
+ended. The new job is launched in a task, as the first one is (see `finish_launch!`). A tab that is starting,
+running or failed throws, and so does a tab that is not an MPI tab.
+"""
+function restart_mpi!(win::WindowState, id::Int)
+    tab = win.tabs.tabs[TabSet.index_of(win.tabs, id)]
+    tab.kind === :mpi || error("tab $id is not an MPI tab, so it has no MPI job to restart")
+    mpi = tab.state
+    mpi.status in (:killed, :ended) ||
+        error("the MPI job of tab $id cannot be restarted while it is $(mpi.status)")
+    # Output that is queued for the panes is fed before the old job's sockets close, since a rank whose
+    # connection failed reports the failure only when its output is fed.
+    for view in mpi.views
+        feed_rank!(view, typemax(Int))
+    end
+    if mpi.job !== nothing
+        MpiLauncher.shutdown!(mpi.job)
+        mpi.job = nothing
+    end
+    set_mpi_status!(win, mpi, :starting, "Restarting $(mpi.nranks) MPI ranks…")
+    mpi.result = nothing
+    mpi.task = @async start_ranks!(mpi, win.launch_options)
     return nothing
 end
 
@@ -861,9 +995,10 @@ function paste_text!(view::TabView, text)
 end
 
 # Queue bytes for the child. The pane then follows the bottom, since the child's echo follows input.
-# Returns false, and does nothing else, when the child has ended or its connection has failed.
+# Returns false, and does nothing else, when the child has ended, its connection has failed, or its job was
+# killed.
 function send_bytes!(view::TabView, bytes::Vector{UInt8})
-    view.failure === nothing || return false
+    (view.failure === nothing && !view.killed) || return false
     ReplPane.send_input!(view.session, bytes) || return false
     sync_props!(view)
     return true

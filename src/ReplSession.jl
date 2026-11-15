@@ -143,7 +143,15 @@ start_output(session::Pty.Session) = PtyOutput.start_reader(session)
 function start_output(transport::ConnectionTransport)
     return PtyOutput.start_reader_from() do
         while true
-            frame = MpiLauncher.take_frame!(transport.connection)
+            frame = try
+                MpiLauncher.take_frame!(transport.connection)
+            catch e
+                # A connection closed by its job (see `MpiLauncher.kill!`) has no more frames, and that is
+                # not an error. The session then has no exit status, as for any connection closed without an
+                # EXIT frame.
+                e isa InvalidStateException && MpiLauncher.is_closing(transport.connection) && return nothing
+                rethrow()
+            end
             if frame.type == MpiLauncher.T_EXIT
                 code, signal = MpiLauncher.exit_status(frame)
                 transport.exit = ExitInfo(code, signal)
@@ -222,7 +230,8 @@ started with `start!`, and a finished one is replaced with `restart!`.
 
 The julia of one MPI rank, reached over `connection`, with its output appended to `log`. `rows` and
 `cols` are the size the launcher gave the rank's terminal. Such a REPL is started with `start!` like any
-other, but cannot be restarted: `restart!` throws, since the rank's job is restarted as a whole.
+other. It is restarted with `restart!(repl, connection; rows, cols)`, once the job that owned the previous
+connection has been shut down, and the new connection belongs to a new job. `restart!(repl)` throws for it.
 
 `rows` and `cols` are the size of the current pseudo-terminal and screen. `exit` holds the exit status
 of the last session once it has ended, and is `nothing` while the REPL has not started or is running.
@@ -230,7 +239,7 @@ Use `has_ended`, not the fields, to ask whether the REPL has ended.
 """
 mutable struct Repl
     const log::RankLog
-    const source::Union{Cmd, ConnectionTransport}
+    source::Union{Cmd, ConnectionTransport}
     const writer_error::Ref{Any}
     closing::Bool
     rows::Int
@@ -286,7 +295,8 @@ end
     restart!(repl)
 
 Start a new session at the current size of `repl`, once the previous one has ended. The restart is
-marked in the log with the previous session's exit status. Throws if the REPL is running.
+marked in the log with the previous session's exit status. Throws if the REPL is running, or if it is
+the julia of an MPI rank (see `restart!(repl, connection; rows, cols)`).
 """
 function restart!(repl::Repl)
     repl.source isa ConnectionTransport && error("this REPL runs in an MPI rank over a launcher " *
@@ -296,6 +306,49 @@ function restart!(repl::Repl)
     open_session!(repl, describe_exit(info))
     repl.exit = nothing
     return repl
+end
+
+"""
+    restart!(repl, connection::MpiLauncher.RankConnection; rows, cols)
+
+Start a new session of the julia of an MPI rank, over `connection`, the connection of a new job for the
+rank. `rows` and `cols` are the size the launcher gave that connection's terminal. The session's terminal
+is then resized to the current size of `repl`, if that differs (see `set_size!`).
+
+The previous connection's job must already be shut down (see `MpiLauncher.shutdown!`), so that its
+connection is closing. An open previous session is ended here without an exit status, and its output
+that has not been read is logged first. The restart is marked in the log, as `restart!(repl)` does.
+Throws if the REPL is not over a connection, or if its previous session is still running and its
+connection is not closing.
+"""
+function restart!(repl::Repl, connection::MpiLauncher.RankConnection; rows::Integer, cols::Integer)
+    repl.source isa ConnectionTransport || error("this REPL runs a command in a pseudo-terminal, so it is " *
+        "restarted without a connection: use restart!(repl)")
+    check_size(rows, cols)
+    if repl.open
+        MpiLauncher.is_closing(repl.source.connection) || error("the REPL is still running, so it cannot be " *
+            "restarted: its job must be shut down first")
+        abandon_session!(repl)
+    end
+    previous = repl.exit === nothing ? UNEXITED_DESCRIPTION : describe_exit(repl.exit)
+    repl.source = ConnectionTransport(connection, Int(rows), Int(cols), nothing)
+    repl.exit = nothing
+    open_session!(repl, previous)
+    return repl
+end
+
+# How the log describes a rank's session that its job stopped before it reported an exit status.
+const UNEXITED_DESCRIPTION = "Julia was stopped with its MPI job, with no exit status"
+
+# End an open session whose connection is closing, so that its output is logged. The reader ends once the
+# connection's socket is closed, so it is waited for. No exit status is recorded.
+function abandon_session!(repl::Repl)
+    close(something(repl.input))
+    PtyOutput.wait_reader!(bytes -> feed_bytes!(repl, bytes), repl.output)
+    wait(repl.writer)
+    end_session!(repl.log, repl.term, time_ns())
+    repl.open = false
+    return nothing
 end
 
 function open_session!(repl::Repl, previous::AbstractString)

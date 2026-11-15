@@ -8,6 +8,7 @@ starting julia. FAKE_WRAPPER_MODE selects what it does:
     wrong_size   Sends HELLO with one more rank than the launch has.
     ignore_close Ignores SIGTERM and, when the socket closes, sleeps and does not exit.
     silent       Never connects.
+    exit_on_input Echoes as echo does, but when a DATA frame contains "exit", sends EXIT 0 and exits.
 
 Any mode may be given as MODE@RANK, which applies it to that rank only. The echo mode writes "resize R C"
 for each RESIZE frame it receives, and the initial one.
@@ -97,6 +98,9 @@ while True:
         sys.exit(0)
     frame_type, payload, buf = item
     if frame_type == T_DATA:
+        if mode == "exit_on_input" and b"exit" in payload:
+            sock.sendall(frame(T_EXIT, struct.pack(">ii", 0, 0)))
+            sys.exit(0)
         sock.sendall(frame(T_DATA, payload))
     elif frame_type == T_SIGNAL:
         sock.sendall(frame(T_DATA, f"signal {payload[0]}\n".encode()))

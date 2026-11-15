@@ -28,7 +28,7 @@ is `nothing` or the number of rows for the terminal and the screen model (see `G
     State(connection::MpiLauncher.RankConnection, rows, cols; changed = () -> nothing)
 
 The log, pane and REPL of one MPI rank, whose julia is reached over `connection`. `rows` and `cols` are the
-terminal size the launcher gave the rank. The rank's session cannot be restarted (see `ReplSession.Repl`).
+terminal size the launcher gave the rank. Its session is restarted over a new connection (see `restart!`).
 
 `changed` is called with no arguments when the pane's rows are refilled while the tab is visible, so
 that the caller can publish them. `visible` is false until `set_visible!` says otherwise, and no
@@ -163,6 +163,23 @@ pane follows the new output.
 """
 function restart!(st::State)
     ReplSession.restart!(st.repl)
+    return restart_pane!(st)
+end
+
+"""
+    restart!(st, connection::MpiLauncher.RankConnection; rows, cols)
+
+Start a new session of an MPI rank's julia over `connection`, a new job's connection for the rank, in
+the same pane. The old output stays in the log, and the pane follows the new output (see
+`ReplSession.restart!`). `rows` and `cols` are the size the launcher gave the connection.
+"""
+function restart!(st::State, connection::MpiLauncher.RankConnection; rows::Integer, cols::Integer)
+    ReplSession.restart!(st.repl, connection; rows, cols)
+    return restart_pane!(st)
+end
+
+# Show the terminal of a session that has just started in the pane, which follows its output.
+function restart_pane!(st::State)
     st.prompt_seen = true
     attach!(st.pane, st.repl.term)
     resume_following!(st.pane)

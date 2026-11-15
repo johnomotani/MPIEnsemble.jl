@@ -171,6 +171,7 @@ function new_view(win::WindowState, start::Function; rank::Union{Nothing, Int} =
     props["thumbSize"] = 1.0
     props["ended"] = false
     props["exitText"] = ""
+    props["rankLabel"] = rank === nothing ? "" : string(rank)
     owner = Ref{Any}(nothing)
     session = start(() -> publish_rows!(owner[]))
     model = QML.JuliaItemModel(session.pane.rows, false)
@@ -576,9 +577,13 @@ function finish_launch!(win::WindowState, mpi::MpiTab)
 end
 
 # Make the panes of a started job. The panes are made visible before they are added to the model that QML
-# repeats, so that each pane is visible when QML creates it.
+# repeats, so that each pane is visible when QML creates it. Pane `i` shows the connection of rank `i - 1`,
+# which the rank labels rely on: the rank comes from each connection's HELLO frame.
 function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
     mpi.job = job
+    for (i, conn) in enumerate(job.ranks)
+        conn.rank == i - 1 || error("connection $i of the job is for rank $(conn.rank), not rank $(i - 1)")
+    end
     for conn in job.ranks
         push!(mpi.views, new_view(win, changed -> ReplPane.State(conn, RANK_ROWS, RANK_COLS; changed);
             rank = conn.rank))

@@ -419,3 +419,75 @@ end
     end
     @test mt_fake_processes_gone()
 end
+
+@testset "MPI tab: each rank pane is labelled with the rank of its connection" begin
+    for n in (1, 2, 3, 4)
+        mt_with() do
+            win = MT_GUI.WindowState("", nothing, n; launch_options = MT_OPTIONS)
+            try
+                MT_GUI.new_tab!(win)
+                MT_GUI.open_mpi_tab!(win)
+                mpi = mt_mpi(win)
+                mt_run_until(() -> mpi.status !== :starting, win)
+                panes = mt_rank_panes(win)
+                @test [v.session.repl.source.connection.rank for v in panes] == collect(0:n - 1)
+                @test [v.props["rankLabel"] for v in panes] ==
+                    [string(v.session.repl.source.connection.rank) for v in panes]
+                @test [v.props["rankLabel"] for v in panes] == [string(r) for r in 0:n - 1]
+                # The REPL pane has no label.
+                repl = win.tabs.tabs[1].state
+                @test win.views[repl.id].props["rankLabel"] == ""
+            finally
+                MT_GUI.shutdown!(win)
+            end
+        end
+    end
+end
+
+@testset "MPI tab: a job whose connections are out of rank order is refused" begin
+    mt_with() do
+        job = MPIEnsemble.MpiLauncher.launch(2, 24, 80; MT_OPTIONS...)
+        try
+            win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+            try
+                mpi = MT_GUI.MpiTab(2)
+                reversed = MPIEnsemble.MpiLauncher.Job(reverse(job.ranks), job.process, job.directory)
+                @test_throws "connection 1 of the job is for rank 1, not rank 0" MT_GUI.attach_job!(win, mpi, reversed)
+                @test isempty(mpi.views)
+                @test isempty(mt_rank_panes(win))
+            finally
+                MT_GUI.shutdown!(win)
+            end
+        finally
+            MPIEnsemble.MpiLauncher.shutdown!(job)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a Julia REPL in each rank prints the rank of its launcher, which is its label" begin
+    # The ranks run the real wrapper, so each rank runs a Julia REPL, which can read the launcher's rank.
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = (launcher = MT_FAKE_LAUNCHER, timeout = MT_TIMEOUT))
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            panes = mt_rank_panes(win)
+            for view in panes
+                @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("println(ENV[\"OMPI_COMM_WORLD_RANK\"])\r"))) === true
+            end
+            # A line of digits alone is the output of println; the echoed command line is not.
+            printed(view) = [strip(l) for l in split(mt_text(view), "\n") if occursin(r"^\s*\d+\s*$", l)]
+            mt_run_until(() -> all(!isempty(printed(v)) for v in panes), win; timeout = 120)
+            for view in panes
+                @test printed(view) == [string(view.session.repl.source.connection.rank)]
+                @test printed(view) == [view.props["rankLabel"]]
+            end
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end

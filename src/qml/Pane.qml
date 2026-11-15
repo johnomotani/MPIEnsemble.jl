@@ -329,6 +329,33 @@ Rectangle {
             }
         }
     }
+    // The MPI rank of a rank pane, at the top-right of the output, just left of the scrollbar. It takes no
+    // mouse input, so presses and drags reach the output beneath it, and it is not part of the text selection.
+    Rectangle {
+        id: rankBadge
+        readonly property real padX: 5
+        readonly property real padY: 1
+        readonly property real minWidth: 20
+        visible: props.rankLabel !== ""
+        enabled: false
+        anchors.top: parent.top
+        anchors.topMargin: 6
+        anchors.right: bar.left
+        anchors.rightMargin: 4
+        width: Math.max(minWidth, badgeText.implicitWidth + 2 * padX)
+        height: badgeText.implicitHeight + 2 * padY
+        radius: 4
+        color: "#cc1f2335"
+
+        Text {
+            id: badgeText
+            anchors.centerIn: parent
+            text: props.rankLabel
+            color: "#a9b1d6"
+            font.pixelSize: 13
+        }
+    }
+
     // Shown after the REPL has ended, or after a rank's connection has failed. It lies over the bottom of the
     // output, which stays scrollable and selectable beneath it. Return also restarts (see Keys.onPressed).
     Rectangle {

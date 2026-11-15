@@ -19,9 +19,9 @@ without error.
 With a number, the window opens an MPI tab after the first REPL tab and starts that many ranks under the
 `mpiexec` given by MPIPreferences.jl (see MPI builds below). The tab says "Starting N MPI ranks…" until the
 job has started, and this does not block the window, so the REPL tabs work meanwhile. Then the tab shows one
-REPL pane per rank, in rank order, in a grid with ceil(sqrt(N)) columns and cells of equal size. Each rank's
-REPL runs in its own Julia process. The keys, paste and mouse selection work in a rank pane as they do in a
-REPL pane, and the pane resizes with the window. Clicking a pane gives it the keyboard focus: its border is
+REPL pane per rank, in rank order, in a grid with ceil(sqrt(N)) columns and cells of equal size. Each pane shows
+its rank number in its top-right corner. Each rank's REPL runs in its own Julia process. The keys, paste and mouse
+selection work in a rank pane as they do in a REPL pane, and the pane resizes with the window. Clicking a pane gives it the keyboard focus: its border is
 bright, and the other panes have dim borders. Keys and paste go only to the focused rank.
 
 If the ranks do not start, for example because the launcher is not found or the ranks do not connect within
@@ -35,8 +35,7 @@ ranks again. Closing the window also ends the job. Either way, the wrapper proce
 
 The launcher that starts the ranks, `MpiLauncher.jl`, can also be used on its own.
 
-The following are not implemented yet: pane labels with the rank number, input broadcast to all ranks, and
-restarting or killing a single rank.
+The following are not implemented yet: input broadcast to all ranks, and restarting or killing a single rank.
 
 The window needs a display (on Linux, for example, an X server or Wayland session).
 

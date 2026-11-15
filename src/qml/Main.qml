@@ -4,22 +4,18 @@ import QtQuick.Layouts
 import jlqml
 
 // Top-level window: a menu bar, then a tab bar above a stack. The stack holds a Pane for each REPL pane
-// (`replModel`), of which only the one in the selected tab is visible, and the MPI tab's grid of rank
-// panes (over `rankModel`), which is shown while the MPI tab is selected. `tabModel` is
-// built by Julia, with the roles tabId, tabTitle and ended. Only a visible pane takes input or is
-// refilled. Julia.windowClosed() is called when the window is closed; the Julia event loop in Gui.jl
-// then returns. Julia asks for the window to close by changing `closeRequest`, once its last tab has
-// closed, or after the rank dialog is cancelled. When Julia has no rank count (`windowProps.askRanks`),
-// RankDialog opens at start-up.
+// (`replModel`), of which only the one in the selected tab is visible, and a MpiTabView for each open MPI
+// tab (`mpiTabs`), of which only the selected one is visible. `tabModel` is built by Julia, with the roles
+// tabId, tabTitle and ended. Only a visible pane takes input or is refilled. Julia.windowClosed() is called
+// when the window is closed; the Julia event loop in Gui.jl then returns. Julia asks for the window to close
+// by changing `closeRequest`, once its last tab has closed, or after the first tab's launch dialog is
+// cancelled. While the window has no tab (`windowProps.askLaunch`), LaunchDialog opens at start-up, and the +
+// button opens it at any other time.
 //
 // ApplicationWindow places the menu bar above the window contents, so the tab bar is anchored to the
 // top of the contents.
 //
-// The MPI tab has a Kill MPI button, which is enabled while the job can be killed. It opens KillDialog,
-// which asks for confirmation; Julia then kills the job, and the rank panes keep their output. Once the
-// job has ended, a Restart MPI button starts it again in the same panes. While a rank is zoomed
-// (`mpiProps.zoomed`), the grid has one column, so that the zoomed pane fills it, and the other rank
-// panes are hidden (`zoomHidden`).
+// Each MPI tab has its own job, Kill MPI and Restart MPI buttons, and rank panes; see MpiTabView.qml.
 Controls.ApplicationWindow {
     id: win
     width: 960
@@ -30,7 +26,6 @@ Controls.ApplicationWindow {
 
     readonly property int selectedId: windowProps.selected
     readonly property int selectedPane: windowProps.selectedPane
-    readonly property string selectedKind: windowProps.selectedKind
     readonly property int closeRequest: windowProps.closeRequest
 
     onClosing: Julia.windowClosed()
@@ -39,20 +34,14 @@ Controls.ApplicationWindow {
             Qt.callLater(win.close)
     }
 
-    // Asks for the rank count when Julia has none. The dialog reports its answer to Julia.
-    RankDialog {
-        id: rankDialog
-    }
-
-    // Asks for confirmation before the MPI job is killed. It is opened by the Kill MPI button.
-    KillDialog {
-        id: killDialog
-        tabId: mpiProps.tabId
+    // Asks what the next tab runs: a serial Julia REPL or MPI ranks. The dialog reports its answer to Julia.
+    LaunchDialog {
+        id: launchDialog
     }
 
     Component.onCompleted: {
-        if (windowProps.askRanks)
-            rankDialog.open()
+        if (windowProps.askLaunch)
+            launchDialog.open()
     }
 
     // Placeholder menus. Each holds one disabled item until its feature is implemented.
@@ -212,7 +201,7 @@ Controls.ApplicationWindow {
                     anchors.fill: parent
                     hoverEnabled: true
                     acceptedButtons: Qt.LeftButton
-                    onClicked: Julia.newTab()
+                    onClicked: launchDialog.open()
                 }
             }
         }
@@ -236,145 +225,14 @@ Controls.ApplicationWindow {
             }
         }
 
-        // The MPI tab: one Pane per MPI rank, in a grid of `mpiProps.columns` columns whose cells are of
-        // equal size. While the job is starting, and when it has failed, the tab shows `mpiProps.message`
-        // instead of the grid. Each rank pane is visible only while the tab is selected, so that it is sized
-        // and refilled only then. One rank pane has the keyboard focus at a time: a click on a pane gives it
-        // the focus (Pane.qml does this), and that pane keeps the focus when the tab is hidden and shown
-        // again. The first pane has the focus when the tab is first shown.
-        Item {
-            id: mpiTab
-            anchors.fill: parent
-            anchors.margins: 8
-            visible: win.selectedKind === "mpi"
+        // One MpiTabView per open MPI tab, each shown while its tab is selected.
+        Repeater {
+            model: mpiTabs
 
-            // Index of the rank pane that has the focus last.
-            property int focusIndex: 0
-
-            function focusCurrent() {
-                if (!mpiTab.visible)
-                    return
-                var cell = mpiRepeater.itemAt(mpiTab.focusIndex)
-                if (cell)
-                    cell.forceActiveFocus()
-            }
-
-            onVisibleChanged: focusCurrent()
-
-            // Shown in place of the rank panes until the job has started. A failed launch keeps it.
-            Text {
-                x: 24
-                width: mpiTab.width - 48
-                y: (mpiTab.height - height) / 2
-                visible: !mpiProps.panes
-                text: mpiProps.message
-                wrapMode: Text.WordWrap
-                horizontalAlignment: Text.AlignHCenter
-                color: mpiProps.messageFailed ? "#f7768e" : "#c0caf5"
-                font.pixelSize: 16
-            }
-
-            // Above the grid: the state of the job, and the button for the next step, which is Kill MPI while the
-            // job can be killed and Restart MPI once it has ended or was killed.
-            Item {
-                id: mpiBar
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: 36
-                visible: mpiProps.panes
-
-                Text {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    // Leaves room for the buttons, which are at most 112 pixels wide and 12 pixels from the note.
-                    anchors.rightMargin: 124
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: mpiProps.message
-                    elide: Text.ElideRight
-                    color: mpiProps.messageFailed || mpiProps.status === "killed" ? "#f7768e" : "#a9b1d6"
-                    font.pixelSize: 13
-                }
-
-                Controls.Button {
-                    id: killButton
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: mpiProps.killable
-                    text: "Kill MPI"
-                    implicitWidth: 96
-                    implicitHeight: 28
-                    onClicked: killDialog.open()
-
-                    contentItem: Text {
-                        text: killButton.text
-                        color: "#c0caf5"
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: 13
-                    }
-                    background: Rectangle {
-                        radius: 3
-                        color: killButton.down ? "#5c2531" : "#7a2e3f"
-                        border.color: "#292e42"
-                    }
-                }
-
-                Controls.Button {
-                    id: restartButton
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: mpiProps.status === "killed" || mpiProps.status === "ended"
-                    text: "Restart MPI"
-                    implicitWidth: 112
-                    implicitHeight: 28
-                    onClicked: Julia.restartMpi(mpiProps.tabId)
-
-                    contentItem: Text {
-                        text: restartButton.text
-                        color: "#c0caf5"
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: 13
-                    }
-                    background: Rectangle {
-                        radius: 3
-                        color: restartButton.down ? "#1f2335" : "#292e42"
-                        border.color: "#292e42"
-                    }
-                }
-            }
-
-            GridLayout {
-                anchors.top: mpiBar.bottom
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                visible: mpiProps.panes
-                columns: mpiProps.zoomed ? 1 : mpiProps.columns
-                rowSpacing: 8
-                columnSpacing: 8
-                uniformCellWidths: true
-                uniformCellHeights: true
-
-                Repeater {
-                    id: mpiRepeater
-                    model: rankModel
-                    onCountChanged: mpiTab.focusCurrent()
-
-                    delegate: Pane {
-                        required property int index
-
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        rankPane: true
-                        visible: mpiTab.visible && !props.zoomHidden
-                        onActiveFocusChanged: {
-                            if (activeFocus)
-                                mpiTab.focusIndex = index
-                        }
-                    }
-                }
+            delegate: MpiTabView {
+                anchors.fill: parent
+                anchors.margins: 8
+                selectedId: win.selectedId
             }
         }
     }

@@ -13,16 +13,16 @@ export Tab, Tabs, open!, close!, select!, selected_id, is_open, index_of, check_
 # Title prefix for each kind of tab that `open!` accepts.
 const KIND_NAMES = Dict(:repl => "Julia", :mpi => "MPI")
 
-# Kinds whose titles carry a number, as in "Julia 2". The other kinds are titled by their prefix alone, and
-# have number 0.
-const NUMBERED_KINDS = (:repl,)
+# Kinds whose first tab is titled by the prefix alone, so that it reads "MPI" rather than "MPI 1". Its later
+# tabs carry their number, as "MPI 2". The other kinds always carry their number, as in "Julia 1".
+const UNNUMBERED_FIRST_KINDS = (:mpi,)
 
 """
     Tab(id, kind, number, state)
 
-A tab of a window. `id` identifies it for the window's lifetime, `number` numbers it in the title (0 for
-kinds that are not numbered), and `state` is the object that holds what the tab shows, which this file does
-not inspect.
+A tab of a window. `id` identifies it for the window's lifetime, `number` counts the tabs of its kind in
+the window from 1, in the order they were opened, and `state` is the object that holds what the tab shows,
+which this file does not inspect.
 """
 struct Tab
     id::Int
@@ -40,11 +40,11 @@ mutable struct Tabs
     tabs::Vector{Tab}
     selected::Int           # id of the selected tab, or 0 when no tab is open
     next_id::Int
-    next_number::Int
+    next_numbers::Dict{Symbol, Int}   # number that the next tab of each kind takes
     closed::Set{Int}
 end
 
-Tabs() = Tabs(Tab[], 0, 1, 1, Set{Int}())
+Tabs() = Tabs(Tab[], 0, 1, Dict{Symbol, Int}(), Set{Int}())
 
 Base.length(ts::Tabs) = length(ts.tabs)
 Base.isempty(ts::Tabs) = isempty(ts.tabs)
@@ -52,12 +52,12 @@ Base.isempty(ts::Tabs) = isempty(ts.tabs)
 """
     tab_title(tab) -> String
 
-The title of `tab`, such as `Julia 2`.
+The title of `tab`, such as `Julia 2`, or `MPI` for the first MPI tab of a window.
 """
 function tab_title(tab::Tab)
     prefix = get(KIND_NAMES, tab.kind, nothing)
     prefix === nothing && throw(ArgumentError("no title for tabs of kind $(tab.kind)"))
-    tab.kind in NUMBERED_KINDS || return prefix
+    tab.kind in UNNUMBERED_FIRST_KINDS && tab.number == 1 && return prefix
     return "$prefix $(tab.number)"
 end
 
@@ -72,14 +72,14 @@ tab_label(tab::Tab, ended::Bool) = ended ? tab_title(tab) * " (ended)" : tab_tit
     open!(ts, kind, state) -> Tab
 
 Add a tab of `kind` at the end of `ts`, holding `state`, and select it. The new tab takes the next id,
-which no other tab in this window uses. A numbered kind also takes the next number; other kinds have number 0.
+which no other tab in this window uses, and the next number of its kind. Numbers are never reused.
 """
 function open!(ts::Tabs, kind::Symbol, state)
     haskey(KIND_NAMES, kind) || throw(ArgumentError("unknown tab kind $kind"))
-    numbered = kind in NUMBERED_KINDS
-    tab = Tab(ts.next_id, kind, numbered ? ts.next_number : 0, state)
+    number = get(ts.next_numbers, kind, 1)
+    ts.next_numbers[kind] = number + 1
+    tab = Tab(ts.next_id, kind, number, state)
     ts.next_id += 1
-    numbered && (ts.next_number += 1)
     push!(ts.tabs, tab)
     ts.selected = tab.id
     return tab

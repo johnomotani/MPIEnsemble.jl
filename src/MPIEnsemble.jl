@@ -54,9 +54,10 @@ end
 """
     run_single_repl(; tall_rows = nothing, rank_count = nothing) -> Nothing
 
-Open the window, with one REPL tab, and block until it is closed. See `Gui.run_single_repl`, which this
-loads on first use. Opening a window needs a display. Arguments are checked before the GUI code is loaded,
-so invalid ones are reported without a display.
+Open the window and block until it is closed. With `rank_count`, the window's only tab at start-up is an MPI
+tab with that many ranks; without it, a launch dialog asks for the first tab, which may be a serial Julia
+REPL or an MPI tab. See `Gui.run_single_repl`, which this loads on first use. Opening a window needs a
+display. Arguments are checked before the GUI code is loaded, so invalid ones are reported without a display.
 """
 function run_single_repl(; tall_rows = nothing, rank_count = nothing, kwargs...)
     tall = check_tall_rows(tall_rows)
@@ -81,9 +82,11 @@ end
 """
     main(args = ARGS) -> Int
 
-Run MPIEnsemble, which opens the single-REPL window and blocks until it is closed. `args` may hold one
-positive integer, the number of MPI ranks. The window records it in its state; without it, the window
-asks for the number in a dialog, and Cancel closes the window without a count. No MPI ranks are launched.
+Run MPIEnsemble, which opens the window and blocks until it is closed. `args` may hold one positive integer,
+the number of MPI ranks. With it, the window's only tab at start-up is an MPI tab with that many ranks.
+Without it, the window has no tab until its launch dialog is answered: "Serial Julia REPL" opens a REPL tab,
+and "MPI with N ranks" opens an MPI tab. Cancel closes the window. No MPI ranks are launched by this function
+itself.
 The window's pseudo-terminal is sized to the pane unless the environment variable
 `MPIENSEMBLE_TALL_PTY_ROWS` is set to a positive integer, which gives it that many rows or the pane's rows
 if more; see `Gui.run_single_repl`.

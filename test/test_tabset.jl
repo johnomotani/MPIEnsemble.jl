@@ -125,16 +125,24 @@ end
     @test_throws ArgumentError TS.open!(ts, :bogus, "x")
 end
 
-@testset "TabSet: the MPI tab is titled without a number" begin
+@testset "TabSet: the first MPI tab is titled without a number, and later MPI tabs are numbered" begin
     ts = TS.Tabs()
     a = TS.open!(ts, :repl, "a")
     m = TS.open!(ts, :mpi, "m")
     b = TS.open!(ts, :repl, "b")
+    m2 = TS.open!(ts, :mpi, "m2")
     @test TS.tab_title(m) == "MPI"
     @test TS.tab_label(m, false) == "MPI"
-    @test m.number == 0
+    @test m.number == 1
+    @test TS.tab_title(m2) == "MPI 2"
+    @test TS.tab_label(m2, true) == "MPI 2 (ended)"
     @test TS.tab_title(a) == "Julia 1"
     @test TS.tab_title(b) == "Julia 2"
+    # Numbers are counted per kind, and a closed tab's number is not given to another tab.
+    TS.close!(ts, m.id)
+    m3 = TS.open!(ts, :mpi, "m3")
+    @test TS.tab_title(m3) == "MPI 3"
+    @test [TS.tab_title(t) for t in ts.tabs] == ["Julia 1", "Julia 2", "MPI 2", "MPI 3"]
 end
 
 # A fixed sequence of pseudo-random numbers in 0:1 (a linear congruential generator), so that the

@@ -21,6 +21,7 @@ using MPIEnsemble
     include("test_repl_connection.jl")
     include("test_mpi_tab.jl")
     include("test_rank_count.jl")
+    include("test_launch_dialog.jl")
     include("test_wrapper.jl")
     include("test_mpi_launcher.jl")
 end

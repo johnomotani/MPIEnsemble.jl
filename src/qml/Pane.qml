@@ -3,7 +3,7 @@ import QtQuick.Controls as Controls
 import jlqml
 
 // Terminal pane: a ListView over the pane's row model, one HTML row per item. Each pane is a REPL pane
-// or the pane of one MPI rank (both in Main.qml), and sets `paneId`, `rowModel` and `props` from the model
+// or the pane of one MPI rank (both in Main.qml and MpiTabView.qml), and sets `paneId`, `rowModel` and `props` from the model
 // that repeats it. Calls to Julia name the pane with `paneId` first, except `isPasteChord`,
 // which only looks at the key. The owner sets `visible` for the pane, and a pane that is hidden is not
 // sized or refilled. The row height and the column width are measured with TextMetrics and reported to

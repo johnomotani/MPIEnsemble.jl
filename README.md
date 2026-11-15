@@ -3,8 +3,8 @@
 A window of per-rank terminal panes for interactive MPI work in Julia. Linux
 only; requires Julia 1.13 or later.
 
-This package is under development. The window shows Julia REPLs in tabs, and, with a rank count, an MPI tab
-with one REPL per MPI rank.
+This package is under development. The window shows Julia REPLs in tabs, and MPI tabs, each with one REPL per
+MPI rank. A window may hold several MPI tabs, each with its own job.
 
 ## Usage
 
@@ -12,12 +12,16 @@ with one REPL per MPI rank.
 julia --project -m MPIEnsemble [RANKS]
 ```
 
-The optional argument `RANKS` is the number of MPI ranks, a positive integer. Without it, the window shows a
-dialog that asks for the number; OK records it, and Cancel closes the window, which then ends the program
-without error.
+The optional argument `RANKS` is the number of MPI ranks, a positive integer. Without it, the window has no tab
+at first, and a launch dialog asks what to open: "Serial Julia REPL", or "MPI with N ranks" for a whole number N
+of 1 or more. The dialog's result becomes the first tab. Cancel closes the window, which then ends the program
+without error. The "+" button in the tab bar opens the same dialog, and its result is a new tab; Cancel then adds
+nothing.
 
-With a number, the window opens an MPI tab after the first REPL tab and starts that many ranks under the
-`mpiexec` given by MPIPreferences.jl (see MPI builds below). The tab says "Starting N MPI ranks…" until the
+With a number, the window's only tab at start-up is an MPI tab, and it starts that many ranks under the
+`mpiexec` given by MPIPreferences.jl (see MPI builds below). The window has no REPL tab until one is opened with
+"+". The "+" dialog can open another MPI tab with any number of ranks, and it starts with the count last used.
+Each MPI tab has its own job, so several jobs can run at once. Each tab says "Starting N MPI ranks…" until the
 job has started, and this does not block the window, so the REPL tabs work meanwhile. Then the tab shows one
 REPL pane per rank, in rank order, in a grid with ceil(sqrt(N)) columns and cells of equal size. Each pane shows
 its rank number in its top-right corner. Each rank's REPL runs in its own Julia process. The keys, paste and mouse
@@ -30,8 +34,8 @@ working. When a rank's Julia exits, its pane shows the exit code, and says that 
 job to restart; a rank pane has no Restart button. If a rank's connection closes without its exit report,
 the error is shown in that rank's pane, and the other ranks keep working.
 
-Closing the MPI tab ends the job, and the MPI tab is not opened again: start the window again to launch the
-ranks again. Closing the window also ends the job. Either way, the wrapper processes and the launcher stop.
+Closing an MPI tab ends its job, and no other tab's job. Closing the window ends every job. Either way, the
+wrapper processes and the launcher of each job stop.
 
 The launcher that starts the ranks, `MpiLauncher.jl`, can also be used on its own.
 
@@ -40,8 +44,8 @@ The following are not implemented yet: input broadcast to all ranks, and restart
 The window needs a display (on Linux, for example, an X server or Wayland session).
 
 The window has a tab bar across its top, with one tab for each REPL, titled "Julia 1", "Julia 2" and so on
-in the order they were opened. The MPI tab, when there is one, is titled "MPI" and comes after the first REPL
-tab. Clicking a tab shows its REPL, and the "+" button at the end of the bar opens
+in the order they were opened. The MPI tabs are titled "MPI", "MPI 2", "MPI 3" and so on, in the order they
+were opened. Clicking a tab shows its REPL, and the "+" button at the end of the bar opens
 another REPL tab and shows it. Each tab has its own REPL, output, scrollback, selection and restart prompt.
 A tab's close button, or a middle-click on the tab, closes it and ends its REPL; the tab to its right is then
 shown, or the tab to its left if there is none. Closing the last tab closes the window, and so does closing

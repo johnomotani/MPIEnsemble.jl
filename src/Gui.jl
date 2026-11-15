@@ -69,7 +69,10 @@ end
 """
     MpiTab(nranks)
 
-The state of an MPI tab. `views` holds one pane per rank, in rank order, once the job has started.
+The state of an MPI tab. `views` holds one pane per rank, in rank order, once the job has started, and
+`rank_panes` is the model of those panes that QML repeats. `props` holds the properties that QML reads for
+the tab: `status`, `message`, `messageFailed`, `killable`, `panes` (true once the rank panes exist), `columns`
+(the columns of the rank grid) and `zoomed`. They are set by the functions below, and are kept per tab.
 `status` is `:starting`, `:running`, `:ended`, `:killed` or `:failed`, and `failure` holds the message of a
 failed start. `:ended` means every rank has ended on its own, or a restart failed after the previous job
 ended; `:killed` means the job was killed. Both can be restarted (see `restart_mpi!`). `job` is the
@@ -77,7 +80,6 @@ launcher of the job, and `task` is the task that starts it. A job that has been 
 keeps its `job` until it is restarted or the tab is closed. `result` is what that task produced:
 the job, or the error that stopped the launch, or `nothing` while the launch is in progress. The event loop
 turns the result into panes and state (see `finish_launch!`), so the task itself never touches the window.
-`offset` is where the fair drain of the rank panes starts next time (see `TabSet.drain_fairly!`).
 `targets` is the set of ranks that receive input from the focused pane, and it holds every rank once the job
 has started (see `attach_job!`). `zoomed` is the rank that alone receives input and is shown, or `nothing`.
 Both are read by `route_targets`, and the other rank panes are hidden while a rank is zoomed (see
@@ -89,43 +91,53 @@ has that rank as its only target without any selection.
 mutable struct MpiTab
     const nranks::Int
     const views::Vector{TabView}
+    const rank_panes::Any
+    const props::QML.JuliaPropertyMap
     status::Symbol
     failure::Union{Nothing, String}
     job::Union{Nothing, MpiLauncher.Job}
     task::Union{Nothing, Task}
     result::Any
-    offset::Int
     targets::Set{Int}
     selected::Union{Nothing, Int}
     zoomed::Union{Nothing, Int}
 end
 
-MpiTab(nranks::Int) =
-    MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0, Set{Int}(), nothing, nothing)
+function MpiTab(nranks::Int)
+    props = QML.JuliaPropertyMap()
+    props["status"] = ""
+    props["message"] = ""
+    props["messageFailed"] = false
+    props["killable"] = false
+    props["panes"] = false
+    props["columns"] = rank_columns(nranks)
+    props["zoomed"] = false
+    return MpiTab(nranks, TabView[], pane_model(), props, :starting, nothing, nothing, nothing, nothing,
+        Set{Int}(), nothing, nothing)
+end
 
 # State of the window. `views` maps the pane ids of the open panes to their views, and `closed_panes`
-# holds the ids of the panes that were closed. `tab_rows` is the tab bar's model. `repl_panes` and
-# `rank_panes` are the models that QML repeats for the REPL panes and the rank panes. `props` holds the
-# window's properties (see `new_window_props`), and `mpi_props` those of the MPI tab. `rank_count` is the
-# number of MPI ranks, or `nothing` until the rank dialog gives one. `mpi_opened` is true once an MPI tab
-# has been opened, which happens at most once per window. `closing` holds ids of tabs whose close was
-# requested; they are closed by the event loop, not by the QML call. `failure` is the first error raised
-# in a QML call, which the event loop rethrows. `offset` is where the fair drain of the tabs starts next
-# time (see `TabSet.drain_fairly!`). `launch_options` are keyword arguments for `MpiLauncher.launch`.
+# holds the ids of the panes that were closed. `tab_rows` is the tab bar's model, and `mpi_tabs` is the
+# model of the open MPI tabs, which QML repeats: each item is a `TabSet.Tab` whose state is an `MpiTab`.
+# `repl_panes` is the model that QML repeats for the REPL panes. `props` holds the window's properties
+# (see `WindowState`). `rank_count` is the number of MPI ranks given on the command line, or `nothing`;
+# it opens the first MPI tab at start-up (see `open_mpi_tab!`). `closing` holds ids of tabs whose close
+# was requested; they are closed by the event loop, not by the QML call. `failure` is the first error
+# raised in a QML call, which the event loop rethrows. `offset` is where the fair drain of the panes
+# starts next time (see `TabSet.drain_fairly!`). `launch_options` are keyword arguments for
+# `MpiLauncher.launch`.
 mutable struct WindowState
     const tabs::TabSet.Tabs
     const views::Dict{Int, TabView}
     const closed_panes::Set{Int}
     const tab_rows::Any
     const repl_panes::Any
-    const rank_panes::Any
+    const mpi_tabs::Any
     const props::QML.JuliaPropertyMap
-    const mpi_props::QML.JuliaPropertyMap
     const tall_rows::Union{Nothing, Int}
     const startup_input::String
     const launch_options::NamedTuple
-    rank_count::Union{Nothing, Int}
-    mpi_opened::Bool
+    const rank_count::Union{Nothing, Int}
     startup_pending::Bool
     const closing::Vector{Int}
     failure::Any
@@ -137,26 +149,27 @@ function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, In
         rank_count::Union{Nothing, Int}; launch_options::NamedTuple = NamedTuple())
     props = QML.JuliaPropertyMap()
     props["selected"] = 0
-    props["selectedKind"] = ""
     props["selectedPane"] = 0
     props["closeRequest"] = 0
-    props["askRanks"] = rank_count === nothing
-    mpi_props = QML.JuliaPropertyMap()
-    mpi_props["status"] = ""
-    mpi_props["message"] = ""
-    mpi_props["columns"] = 1
-    mpi_props["tabId"] = 0
-    mpi_props["killable"] = false
-    mpi_props["panes"] = false
-    mpi_props["messageFailed"] = false
-    mpi_props["zoomed"] = false
+    # `askLaunch` is true while the window has no tab yet, and the launch dialog is to be shown at start-up.
+    props["askLaunch"] = rank_count === nothing
+    # `lastRanks` is the rank count of the MPI tab opened last, or 0. The launch dialog starts with it.
+    props["lastRanks"] = rank_count === nothing ? 0 : rank_count
     rows = QML.JuliaItemModel(TabSet.Tab[], false)
     QML.addrole!(rows, "tabId", t -> t.id)
     QML.addrole!(rows, "tabTitle", t -> TabSet.tab_label(t, tab_ended(t)))
     QML.addrole!(rows, "ended", tab_ended)
-    return WindowState(TabSet.Tabs(), Dict{Int, TabView}(), Set{Int}(), rows, pane_model(), pane_model(),
-        props, mpi_props, tall_rows, String(startup_input), launch_options, rank_count, false, true, Int[],
-        nothing, 0, 1)
+    return WindowState(TabSet.Tabs(), Dict{Int, TabView}(), Set{Int}(), rows, pane_model(), mpi_tab_model(),
+        props, tall_rows, String(startup_input), launch_options, rank_count, true, Int[], nothing, 0, 1)
+end
+
+# The model of the open MPI tabs that QML repeats. The roles are the required properties of MpiTabView.qml.
+function mpi_tab_model()
+    model = QML.JuliaItemModel(TabSet.Tab[], false)
+    QML.addrole!(model, "tabId", t -> t.id)
+    QML.addrole!(model, "rankModel", t -> QML.QVariant(t.state.rank_panes))
+    QML.addrole!(model, "mpiProps", t -> QML.QVariant(t.state.props.propertymap))
+    return model
 end
 
 # The model of panes that QML repeats. Each item is a `TabView`, and its roles are the required properties
@@ -265,28 +278,31 @@ end
 """
     run_single_repl(; startup_input = "", tall_rows = nothing, rank_count = nothing)
 
-Open the window with one tab, which runs a Julia REPL, and run the Qt event loop on the calling thread
-until the window is closed. Must be called from the main thread, not from an `@async` task. Throws an
-error if a window is already open in this process.
+Open the window and run the Qt event loop on the calling thread until the window is closed. Must be called
+from the main thread, not from an `@async` task. Throws an error if a window is already open in this process.
 
-`rank_count` is the number of MPI ranks, or `nothing`. With a count, the window opens an MPI tab after the
-REPL tab and launches that many ranks (see `open_mpi_tab!`). Without a count, the window first shows a
-modal dialog that asks for one. Its OK button is enabled only for a whole number of 1 or more, and records
-the count, and the MPI tab is opened. Cancel, or Escape, closes the window, and this function then returns
-without a count. An invalid `rank_count` throws `ArgumentError`.
+`rank_count` is the number of MPI ranks, or `nothing`. With a count, the window's only tab at start-up is an
+MPI tab, which launches that many ranks (see `open_mpi_tab!`); the window then has no REPL tab until one is
+opened with "+". Without a count, the window has no tab at start-up and first shows a modal launch dialog,
+which asks for the first tab. The dialog offers "Serial Julia REPL", which opens a REPL tab, or "MPI with N
+ranks", which opens an MPI tab with N ranks, where N is a whole number of 1 or more. Cancel, or Escape,
+closes the window, and this function then returns. An invalid `rank_count` throws `ArgumentError`.
 
 Each REPL tab is an independent REPL with its own pane, output, scrollback, selection, scrollbar and restart
 prompt. The tab bar at the top of the window lists the tabs as "Julia 1", "Julia 2", and so on, in the
-order they were opened; the number is never reused in the window. The "+" button opens a new REPL tab and
-selects it. The close button of a tab, or a middle-click on it, closes the tab and ends its REPL. The
-tab to its right is then selected, or the tab to its left if there is none. Closing the last tab closes
+order they were opened; the number is never reused in the window. The first MPI tab is titled "MPI", and later
+ones "MPI 2", "MPI 3", and so on. The "+" button opens the launch dialog again. Its result is a new tab, a REPL
+tab or an MPI tab, which is selected. Cancel then adds no tab. A window may hold any number of MPI tabs at once,
+each with its own job. The close button of a tab, or a middle-click on it, closes the tab and ends its
+REPL. The tab to its right is then selected, or the tab to its left if there is none. Closing the last tab closes
 the window. A tab whose REPL has ended is labelled "(ended)" and its title is dimmed. Only the selected
 tab is shown and takes keyboard input, but the other tabs keep running, and their output is read while
 they are hidden. Each tab keeps its scroll position while hidden. Closing the window ends every tab's REPL.
 
 The window starts `julia -q --startup-file=no` in a pseudo-terminal, sized to the pane. When the
 first `julia> ` prompt appears, `startup_input` is written to the pseudo-terminal, as if typed. Use
-`"\\r"` at the end of each line to submit it. Only the first tab's REPL receives `startup_input`.
+`"\\r"` at the end of each line to submit it. Only the first REPL tab opened in the window receives
+`startup_input`.
 
 With `tall_rows = nothing` (the default), the pseudo-terminal has as many rows as the pane. An
 integer `tall_rows` gives the pseudo-terminal and the screen model `max(tall_rows, rows that fit the
@@ -319,20 +335,21 @@ input is ignored.
 
 Each log line is one row of the pane: a line wider than the pane is cut off at its right edge.
 
-The MPI tab has a Kill MPI button while its job can be killed. After confirmation in a dialog, the job is
+Each MPI tab has a Kill MPI button while its job can be killed. After confirmation in a dialog, the job is
 killed at once, and each rank that had not ended shows that its job was killed. The rank panes stay in the
 tab with their output, and refuse input. When every rank has ended on its own, or the job was killed, the
 tab offers a Restart MPI button, which starts a new job with the same number of ranks in the same panes.
-Each pane keeps its output, and the new session's output follows it.
+Each pane keeps its output, and the new session's output follows it. Killing, restarting or closing one MPI
+tab does not affect the jobs of the other tabs.
 
 An error from a tab's reader or writer task, or from a QML call, is rethrown by this function once the
 window has closed. The error of a rank's connection is shown in that rank's pane and printed to standard
 error instead, and the other panes keep working.
 
-Each rank pane has a Zoom button. Zooming a rank makes its pane fill the MPI tab and hides the other rank panes,
-which keep receiving and buffering their output. While the rank is zoomed, keys and pastes go only to it. The
-selection is kept, and takes effect again when the zoom ends, by a second click on the Zoom button. The zoom
-survives a Kill MPI, a restart, and a change of tab.
+Each rank pane has a Zoom button. Zooming a rank makes its pane fill its MPI tab and hides the other rank panes
+of that tab, which keep receiving and buffering their output. While the rank is zoomed, keys and pastes go only
+to it. The selection is kept, and takes effect again when the zoom ends, by a second click on the Zoom button.
+The zoom survives a Kill MPI, a restart, and a change of tab. Each MPI tab has its own zoom and selection.
 """
 function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing, rank_count = nothing)
     tall = check_tall_rows(tall_rows)
@@ -342,10 +359,9 @@ function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothi
     register_functions!(win)
     WINDOW_OPEN[] = true
     try
-        new_tab!(win)
-        QML.loadqml(QML_MAIN; tabModel = win.tab_rows, replModel = win.repl_panes, rankModel = win.rank_panes,
-            windowProps = win.props, mpiProps = win.mpi_props)
-        ranks === nothing || open_mpi_tab!(win)
+        QML.loadqml(QML_MAIN; tabModel = win.tab_rows, replModel = win.repl_panes, mpiTabs = win.mpi_tabs,
+            windowProps = win.props)
+        ranks === nothing || open_mpi_tab!(win, ranks)
         run_loop!(win)
     finally
         WINDOW_OPEN[] = false
@@ -358,9 +374,9 @@ end
 # take a tab id run `tab_call`.
 function register_functions!(win::WindowState)
     QML.qmlfunction("windowClosed", () -> (WINDOW_OPEN[] = false; nothing))
-    QML.qmlfunction("setRankCount", n -> guarded(() -> (set_rank_count!(win, Int(n)); open_mpi_tab!(win)), win, nothing))
-    QML.qmlfunction("cancelRankDialog", () -> guarded(() -> cancel_rank_dialog!(win), win, nothing))
-    QML.qmlfunction("newTab", () -> guarded(() -> new_tab!(win), win, nothing))
+    QML.qmlfunction("launchSerial", () -> guarded(() -> launch_serial!(win), win, nothing))
+    QML.qmlfunction("launchMpi", n -> guarded(() -> launch_mpi!(win, Int(n)), win, nothing))
+    QML.qmlfunction("cancelLaunch", () -> guarded(() -> cancel_launch!(win), win, nothing))
     QML.qmlfunction("selectTab", id -> tab_call(tab_id -> select_tab!(win, tab_id), win, id, nothing))
     QML.qmlfunction("closeTab", id -> tab_call(tab_id -> request_close!(win, tab_id), win, id, nothing))
     QML.qmlfunction("paneSized", (id, w, h, cw, ch) ->
@@ -454,7 +470,7 @@ end
 check_failure!(win::WindowState) = win.failure === nothing || throw(win.failure)
 
 # One pass of the event loop: close the tabs that were asked to close, take the results of MPI launches,
-# then feed the output of every tab, sharing `LINES_PER_TICK` lines between them.
+# then feed the output of every pane of every tab, sharing `LINES_PER_TICK` lines between all of them.
 function service!(win::WindowState)
     while !isempty(win.closing)
         id = popfirst!(win.closing)
@@ -463,41 +479,38 @@ function service!(win::WindowState)
     for tab in win.tabs.tabs
         tab.kind === :mpi && finish_launch!(win, tab.state)
     end
-    win.offset = TabSet.drain_fairly!((tab, limit) -> feed_tab!(win, tab, limit), win.tabs.tabs,
+    win.offset = TabSet.drain_fairly!((view, limit) -> feed_view!(win, view, limit), open_views(win),
         LINES_PER_TICK, win.offset)
     # Ranks end while their output is fed, so whether the job has ended is checked afterwards.
     for tab in win.tabs.tabs
-        tab.kind === :mpi && update_job_state!(win, tab.state)
+        tab.kind === :mpi && update_job_state!(tab.state)
     end
     return nothing
 end
 
-# Feed the output of one tab, and return the number of lines fed. A REPL tab's pane is fed, and its
-# ended state is reported in the tab bar. An MPI tab shares `limit` between its rank panes.
-function feed_tab!(win::WindowState, tab::TabSet.Tab, limit::Int)
-    tab.kind === :mpi && return feed_mpi!(tab.state, limit)
-    view = tab.state
+# The panes of the open tabs, in tab order: the pane of each REPL tab, and the rank panes of each MPI tab.
+function open_views(win::WindowState)
+    views = TabView[]
+    for tab in win.tabs.tabs
+        append!(views, tab_views(tab))
+    end
+    return views
+end
+
+# Feed one pane, and return the number of lines fed. A rank pane is fed by `feed_rank!`. A REPL tab's pane
+# is fed here, and its ended state is reported in the tab bar.
+function feed_view!(win::WindowState, view::TabView, limit::Int)
+    view.rank === nothing || return feed_rank!(view, limit)
     lines = ReplPane.feed!(view.session, limit)
     sync_props!(view)
     ended = has_ended(view.session.repl)
     if ended != view.ended_shown
         view.ended_shown = ended
-        i = TabSet.index_of(win.tabs, tab.id)
+        i = findfirst(t -> t.kind === :repl && t.state === view, win.tabs.tabs)
+        i === nothing && error("pane $(view.id) is not the pane of an open REPL tab")
         QML.emit_data_changed(win.tab_rows, i, 1, i, 1)
     end
     return lines
-end
-
-# Feed the rank panes of an MPI tab, sharing `limit` between them in turn (see `TabSet.drain_fairly!`),
-# so that one rank with much output cannot hold back the others.
-function feed_mpi!(mpi::MpiTab, limit::Int)
-    used = 0
-    mpi.offset = TabSet.drain_fairly!(mpi.views, limit, mpi.offset) do view, share
-        lines = feed_rank!(view, share)
-        used += lines
-        return lines
-    end
-    return used
 end
 
 # Feed one rank's pane. An error from the rank's connection, such as its wrapper closing the socket
@@ -517,7 +530,7 @@ function feed_rank!(view::TabView, limit::Int)
     return lines
 end
 
-# Add a REPL tab at the end and select it. The startup input goes to the first tab only.
+# Add a REPL tab at the end and select it. The startup input goes to the first REPL tab only.
 function new_tab!(win::WindowState)
     startup = win.startup_pending ? win.startup_input : ""
     win.startup_pending = false
@@ -543,7 +556,7 @@ function selected_tab(win::WindowState)
 end
 
 # Make the panes of the selected tab visible and those of every other tab hidden, and tell QML which tab
-# is selected. While a rank of an MPI tab is zoomed, its other rank panes are hidden as well. Each rank pane
+# is selected (`selected`, which an MPI tab compares with its own id). While a rank of an MPI tab is zoomed, its other rank panes are hidden as well. Each rank pane
 # has the props `zoomed` and `zoomHidden`, which QML reads for its zoom button and its visibility: they are
 # set here, for every pane, so that a pane which is hidden by the zoom is hidden in QML too. A pane's
 # visibility is set before the properties that QML binds to it change, so that a pane which QML creates or
@@ -553,7 +566,7 @@ function show_selection!(win::WindowState)
     for tab in win.tabs.tabs
         shown = tab.id == current
         mpi = tab.kind === :mpi ? tab.state : nothing
-        mpi === nothing || (win.mpi_props["zoomed"] = mpi.zoomed !== nothing)
+        mpi === nothing || (mpi.props["zoomed"] = mpi.zoomed !== nothing)
         for view in tab_views(tab)
             zoom_hidden = mpi !== nothing && zoom_hides(mpi, view)
             ReplPane.set_visible!(view.session, shown && !zoom_hidden)
@@ -567,47 +580,55 @@ function show_selection!(win::WindowState)
     end
     tab = selected_tab(win)
     win.props["selected"] = current
-    win.props["selectedKind"] = tab === nothing ? "" : string(tab.kind)
     win.props["selectedPane"] = tab !== nothing && tab.kind === :repl ? tab.state.id : 0
     return nothing
 end
 
 """
-    open_mpi_tab!(win) -> Tab
+    open_mpi_tab!(win, nranks) -> Tab
 
-Open the MPI tab after the tabs that are open, select it, and start the ranks. The window's rank count
-gives the number of ranks. The tab shows that the ranks are starting, and the launch runs in a task, so
-that the window stays responsive while the job starts. When the job has started, the tab shows one pane
-per rank, in rank order; if it cannot start, the tab shows the error and the error is printed to standard
-error. A window has at most one MPI tab. Throws if the window has no rank count or already has an MPI tab.
+Open an MPI tab with `nranks` ranks after the tabs that are open, select it, and start its ranks. The tab
+shows that the ranks are starting, and the launch runs in a task, so that the window stays responsive while
+the job starts. When the job has started, the tab shows one pane per rank, in rank order; if it cannot start,
+the tab shows the error and the error is printed to standard error. Each MPI tab has its own job, so a window
+may hold several. The window's `lastRanks` becomes `nranks`, which the launch dialog offers next time.
+Throws `ArgumentError`, and opens nothing, if `nranks` is not a positive integer.
 """
-function open_mpi_tab!(win::WindowState)
-    n = win.rank_count
-    n === nothing && error("the window has no rank count, so there are no MPI ranks to launch")
-    win.mpi_opened && error("the window already has an MPI tab, which is not opened again")
-    win.mpi_opened = true
+function open_mpi_tab!(win::WindowState, nranks::Integer)
+    n = check_rank_count(nranks)
     mpi = MpiTab(n)
     tab = TabSet.open!(win.tabs, :mpi, mpi)
-    win.mpi_props["tabId"] = tab.id
-    win.mpi_props["columns"] = rank_columns(n)
-    set_mpi_status!(win, mpi, :starting, "Starting $n MPI ranks…")
+    set_mpi_status!(mpi, :starting, "Starting $n MPI ranks…")
     show_selection!(win)
     push!(win.tab_rows, tab)
+    push!(win.mpi_tabs, tab)
+    win.props["askLaunch"] = false
+    win.props["lastRanks"] = n
     mpi.task = @async start_ranks!(mpi, win.launch_options)
     return tab
+end
+
+"""
+    open_mpi_tab!(win) -> Tab
+
+Open the MPI tab that the command line asked for, with the window's rank count (see `open_mpi_tab!(win, nranks)`).
+Throws if the window was not given a rank count.
+"""
+function open_mpi_tab!(win::WindowState)
+    win.rank_count === nothing && error("the window has no rank count, so there are no MPI ranks to launch")
+    return open_mpi_tab!(win, win.rank_count)
 end
 
 # Set the status of an MPI tab and the properties that QML reads for it. `message` is the text shown in
 # the tab: the note above the rank panes once they exist, or the text in place of them otherwise. It is
 # the failure message when the tab has failed. `is_error` marks a note that reports an error.
-function set_mpi_status!(win::WindowState, mpi::MpiTab, status::Symbol, message::AbstractString;
-        is_error::Bool = false)
+function set_mpi_status!(mpi::MpiTab, status::Symbol, message::AbstractString; is_error::Bool = false)
     mpi.status = status
     mpi.failure = status === :failed ? String(message) : nothing
-    win.mpi_props["status"] = String(status)
-    win.mpi_props["message"] = String(message)
-    win.mpi_props["messageFailed"] = is_error || status === :failed
-    update_killable!(win, mpi)
+    mpi.props["status"] = String(status)
+    mpi.props["message"] = String(message)
+    mpi.props["messageFailed"] = is_error || status === :failed
+    update_killable!(mpi)
     return nothing
 end
 
@@ -617,19 +638,19 @@ rank_running(view::TabView) = !view.killed && !has_ended(view.session.repl)
 mpi_killable(mpi::MpiTab) = mpi.status === :running && any(rank_running, mpi.views)
 
 # Set the property that enables the Kill MPI button, when it changes.
-function update_killable!(win::WindowState, mpi::MpiTab)
+function update_killable!(mpi::MpiTab)
     killable = mpi_killable(mpi)
-    killable == win.mpi_props["killable"] || (win.mpi_props["killable"] = killable)
+    killable == mpi.props["killable"] || (mpi.props["killable"] = killable)
     return nothing
 end
 
 # The job has ended when it is running and no rank is running: each rank has ended on its own, or was killed.
 # Then the tab says so, and the job can be restarted.
-function update_job_state!(win::WindowState, mpi::MpiTab)
+function update_job_state!(mpi::MpiTab)
     if mpi.status === :running && !any(rank_running, mpi.views)
-        set_mpi_status!(win, mpi, :ended, "The MPI job has ended.")
+        set_mpi_status!(mpi, :ended, "The MPI job has ended.")
     end
-    update_killable!(win, mpi)
+    update_killable!(mpi)
     return nothing
 end
 
@@ -658,12 +679,12 @@ function finish_launch!(win::WindowState, mpi::MpiTab)
         attach_job!(win, mpi, result)
     elseif isempty(mpi.views)
         message = "Could not start $(mpi.nranks) MPI ranks: $(sprint(showerror, result))"
-        set_mpi_status!(win, mpi, :failed, message)
+        set_mpi_status!(mpi, :failed, message)
         println(stderr, message)
     else
         message = "Could not restart $(mpi.nranks) MPI ranks: $(sprint(showerror, result)). " *
             "Restart MPI to try again."
-        set_mpi_status!(win, mpi, :ended, message; is_error = true)
+        set_mpi_status!(mpi, :ended, message; is_error = true)
         println(stderr, message)
     end
     return nothing
@@ -687,7 +708,7 @@ function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
             push!(mpi.views, new_view(win, changed -> ReplPane.State(conn, RANK_ROWS, RANK_COLS; changed);
                 rank = conn.rank))
         end
-        win.mpi_props["panes"] = true
+        mpi.props["panes"] = true
     else
         length(mpi.views) == length(job.ranks) || error("the restarted job has $(length(job.ranks)) ranks, " *
             "but the tab has $(length(mpi.views)) panes")
@@ -700,11 +721,11 @@ function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
         end
     end
     sync_selection_props!(mpi)
-    set_mpi_status!(win, mpi, :running, "")
+    set_mpi_status!(mpi, :running, "")
     show_selection!(win)
     if fresh
         for view in mpi.views
-            push!(win.rank_panes, view)
+            push!(mpi.rank_panes, view)
         end
     end
     return nothing
@@ -732,7 +753,7 @@ function kill_mpi!(win::WindowState, id::Int)
         view.killed = true
         sync_props!(view)
     end
-    set_mpi_status!(win, mpi, :killed, "The MPI job was killed.")
+    set_mpi_status!(mpi, :killed, "The MPI job was killed.")
     return nothing
 end
 
@@ -761,29 +782,31 @@ function restart_mpi!(win::WindowState, id::Int)
         MpiLauncher.shutdown!(mpi.job)
         mpi.job = nothing
     end
-    set_mpi_status!(win, mpi, :starting, "Restarting $(mpi.nranks) MPI ranks…")
+    set_mpi_status!(mpi, :starting, "Restarting $(mpi.nranks) MPI ranks…")
     mpi.result = nothing
     mpi.task = @async start_ranks!(mpi, win.launch_options)
     return nothing
 end
 
-# The rank count given to the window, or `nothing` while none has been given.
-rank_count(win::WindowState) = win.rank_count
-
-# Record the count given in the rank dialog. The window must not have a count already. Opening the MPI tab
-# is a separate step (see `open_mpi_tab!`).
-function set_rank_count!(win::WindowState, n::Integer)
-    win.rank_count === nothing || error("the window already has a rank count of $(win.rank_count)")
-    win.rank_count = check_rank_count(n)
-    win.props["askRanks"] = false
+# The launch dialog's result "MPI with n ranks": open an MPI tab with n ranks. Throws, before anything is
+# opened, if n is not a positive integer.
+function launch_mpi!(win::WindowState, n::Integer)
+    open_mpi_tab!(win, n)
     return nothing
 end
 
-# The rank dialog was cancelled: no count is recorded and the window is closed.
-function cancel_rank_dialog!(win::WindowState)
-    win.rank_count === nothing || error("the window already has a rank count of $(win.rank_count)")
-    win.props["askRanks"] = false
-    win.props["closeRequest"] = win.props["closeRequest"] + 1
+# The launch dialog's result "Serial Julia REPL": open a REPL tab, which is selected.
+function launch_serial!(win::WindowState)
+    new_tab!(win)
+    win.props["askLaunch"] = false
+    return nothing
+end
+
+# The launch dialog was cancelled. Cancelling the dialog of the first tab closes the window, which has no
+# tab to show. Otherwise nothing changes.
+function cancel_launch!(win::WindowState)
+    win.props["askLaunch"] = false
+    TabSet.window_should_close(win.tabs) && (win.props["closeRequest"] = win.props["closeRequest"] + 1)
     return nothing
 end
 
@@ -805,6 +828,11 @@ function close_tab!(win::WindowState, id::Int)
     end
     TabSet.close!(win.tabs, id)
     delete!(win.tab_rows, i)
+    if tab.kind === :mpi
+        j = findfirst(t -> t === tab, Base.values(win.mpi_tabs)[])
+        j === nothing && error("MPI tab $id is not in the model of MPI tabs")
+        delete!(win.mpi_tabs, j)
+    end
     show_selection!(win)
     if TabSet.window_should_close(win.tabs)
         win.props["closeRequest"] = win.props["closeRequest"] + 1
@@ -842,7 +870,7 @@ function close_mpi!(win::WindowState, mpi::MpiTab)
         ReplPane.set_visible!(view.session, false)
     end
     for view in mpi.views
-        remove_view!(win, view, win.rank_panes)
+        remove_view!(win, view, mpi.rank_panes)
         try
             ReplPane.shutdown!(view.session)
         catch e

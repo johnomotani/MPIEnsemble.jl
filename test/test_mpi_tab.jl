@@ -25,7 +25,7 @@ mt_with(f; mode::AbstractString = "echo") =
     withenv(f, "XDG_RUNTIME_DIR" => get(ENV, "XDG_RUNTIME_DIR", tempdir()), "FAKE_WRAPPER_MODE" => mode)
 
 mt_mpi(win) = only(t.state for t in win.tabs.tabs if t.kind === :mpi)
-mt_rank_panes(win) = Base.values(win.rank_panes)[]
+mt_rank_panes(mpi::MT_GUI.MpiTab) = Base.values(mpi.rank_panes)[]
 
 # Drive the window's event loop until `done()` holds. A failure of the window is thrown, as the loop does.
 # Fails after `timeout` seconds, so that a hang shows up as an error.
@@ -91,22 +91,22 @@ end
                 @test [t.kind for t in win.tabs.tabs] == [:repl, :mpi]
                 @test MPIEnsemble.TabSet.tab_title(tab) == "MPI"
                 @test win.props["selected"] == tab.id
-                @test win.props["selectedKind"] == "mpi"
+                @test win.props["selected"] == tab.id
                 @test win.props["selectedPane"] == 0
                 @test mpi.status === :starting
-                @test win.mpi_props["status"] == "starting"
-                @test win.mpi_props["message"] == "Starting $n MPI ranks…"
-                @test isempty(mt_rank_panes(win))
+                @test mpi.props["status"] == "starting"
+                @test mpi.props["message"] == "Starting $n MPI ranks…"
+                @test isempty(mt_rank_panes(mpi))
                 mt_run_until(() -> mpi.status !== :starting, win)
                 @test mpi.status === :running
                 @test mpi.failure === nothing
-                @test win.mpi_props["status"] == "running"
+                @test mpi.props["status"] == "running"
                 @test [v.rank for v in mpi.views] == collect(0:n - 1)
-                @test length(mt_rank_panes(win)) == n
-                @test [v.id for v in mt_rank_panes(win)] == [v.id for v in mpi.views]
+                @test length(mt_rank_panes(mpi)) == n
+                @test [v.id for v in mt_rank_panes(mpi)] == [v.id for v in mpi.views]
                 @test all(v.session.visible for v in mpi.views)
                 @test all(v -> v.rank !== nothing, mpi.views)
-                @test win.mpi_props["columns"] == ceil(Int, sqrt(n))
+                @test mpi.props["columns"] == ceil(Int, sqrt(n))
                 # The REPL tab is not affected: its pane is still there, and hidden.
                 repl = win.tabs.tabs[1].state
                 @test !repl.session.visible
@@ -116,7 +116,7 @@ end
                 job_process = mpi.job.process
                 MT_GUI.close_tab!(win, tab.id)
                 @test all(!haskey(win.views, id) for id in pane_ids)
-                @test isempty(mt_rank_panes(win))
+                @test isempty(mt_rank_panes(mpi))
                 @test process_exited(job_process)
                 @test timedwait(() -> all(!mt_exists(p) for p in pids), 10; pollint = 0.05) === :ok
                 @test mt_fake_processes_gone()
@@ -164,7 +164,6 @@ end
             # except a size or scroll event, which returns the default.
             MT_GUI.select_tab!(win, repl_tab.id)
             @test !mpi.views[1].session.visible
-            @test win.props["selectedKind"] == "repl"
             @test win.props["selectedPane"] == repl_tab.state.id
             @test MT_GUI.pane_call(_ -> error("not run"), win, rank_id, 0; hidden_ok = true) == 0
             @test win.failure === nothing
@@ -662,8 +661,8 @@ end
             @test mpi.status === :failed
             @test occursin("Could not start 2 MPI ranks", mpi.failure)
             @test occursin("was not found or is not executable", mpi.failure)
-            @test win.mpi_props["status"] == "failed"
-            @test win.mpi_props["message"] == mpi.failure
+            @test mpi.props["status"] == "failed"
+            @test mpi.props["message"] == mpi.failure
             @test isempty(mpi.views)
             @test occursin(mpi.failure, read(stderr_path, String))
             @test win.failure === nothing
@@ -690,7 +689,7 @@ end
             mt_run_until(() -> mpi.status !== :starting, win)
             @test mpi.status === :failed
             @test occursin("only 0 of 2 ranks connected within 2 s", mpi.failure)
-            @test win.mpi_props["status"] == "failed"
+            @test mpi.props["status"] == "failed"
         finally
             MT_GUI.shutdown!(win)
         end
@@ -735,19 +734,18 @@ end
     end
 end
 
-@testset "MPI tab: the window's count is used once, and the MPI tab opens once" begin
-    win = MT_GUI.WindowState("", nothing, nothing)
+@testset "MPI tab: the window's count opens the first MPI tab, and a window without one cannot open it" begin
+    win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
     @test_throws "has no rank count" MT_GUI.open_mpi_tab!(win)
-    MT_GUI.set_rank_count!(win, 2)
     @test isempty(win.tabs.tabs)
+    @test win.props["askLaunch"] == true
     mt_with() do
         try
-            MT_GUI.open_mpi_tab!(win)
+            MT_GUI.launch_mpi!(win, 2)
             mpi = mt_mpi(win)
             mt_run_until(() -> mpi.status !== :starting, win)
-            @test_throws "already has an MPI tab" MT_GUI.open_mpi_tab!(win)
-            MT_GUI.close_tab!(win, win.tabs.tabs[1].id)
-            @test_throws "already has an MPI tab" MT_GUI.open_mpi_tab!(win)
+            @test length(mpi.views) == 2
+            @test mpi.nranks == 2
         finally
             MT_GUI.shutdown!(win)
         end
@@ -764,7 +762,7 @@ end
                 MT_GUI.open_mpi_tab!(win)
                 mpi = mt_mpi(win)
                 mt_run_until(() -> mpi.status !== :starting, win)
-                panes = mt_rank_panes(win)
+                panes = mt_rank_panes(mpi)
                 @test [v.session.repl.source.connection.rank for v in panes] == collect(0:n - 1)
                 @test [v.props["rankLabel"] for v in panes] ==
                     [string(v.session.repl.source.connection.rank) for v in panes]
@@ -789,7 +787,7 @@ end
                 reversed = MPIEnsemble.MpiLauncher.Job(reverse(job.ranks), job.process, job.directory)
                 @test_throws "connection 1 of the job is for rank 1, not rank 0" MT_GUI.attach_job!(win, mpi, reversed)
                 @test isempty(mpi.views)
-                @test isempty(mt_rank_panes(win))
+                @test isempty(mt_rank_panes(mpi))
             finally
                 MT_GUI.shutdown!(win)
             end
@@ -809,7 +807,7 @@ end
             mpi = mt_mpi(win)
             mt_run_until(() -> mpi.status !== :starting, win)
             mt_size!(win)
-            panes = mt_rank_panes(win)
+            panes = mt_rank_panes(mpi)
             for view in panes
                 @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("println(ENV[\"OMPI_COMM_WORLD_RANK\"])\r"))) === true
             end
@@ -856,7 +854,7 @@ end
             @test MT_GUI.send_bytes!(mpi.views[2], Vector{UInt8}(codeunits("before-kill"))) === true
             mt_run_until(() -> occursin("before-kill", mt_text(mpi.views[2])), win)
             @test MT_GUI.mpi_killable(mpi)
-            @test win.mpi_props["killable"] == true
+            @test mpi.props["killable"] == true
 
             pids = [v.session.repl.source.connection.pid for v in mpi.views]
             job_process = mpi.job.process
@@ -865,8 +863,8 @@ end
 
             @test mpi.status === :killed
             @test mpi.failure === nothing
-            @test win.mpi_props["status"] == "killed"
-            @test win.mpi_props["killable"] == false
+            @test mpi.props["status"] == "killed"
+            @test mpi.props["killable"] == false
             @test !MT_GUI.mpi_killable(mpi)
             @test process_exited(job_process)
             @test timedwait(() -> all(!mt_exists(p) for p in pids), 10; pollint = 0.05) === :ok
@@ -884,7 +882,7 @@ end
             end
 
             # The panes stay in the tab, with their output, which is still fed after the kill.
-            @test [v.id for v in mt_rank_panes(win)] == ids
+            @test [v.id for v in mt_rank_panes(mpi)] == ids
             @test all(haskey(win.views, id) for id in ids)
             for _ in 1:20
                 MT_GUI.service!(win)
@@ -909,7 +907,7 @@ end
             # Closing the killed tab removes its panes; the job has nothing left to stop.
             MT_GUI.close_tab!(win, tab.id)
             @test isempty(win.tabs.tabs)
-            @test isempty(mt_rank_panes(win))
+            @test isempty(mt_rank_panes(mpi))
             @test process_exited(job_process)
             @test mt_fake_processes_gone()
         finally
@@ -928,7 +926,7 @@ end
             mpi = tab.state
             mt_run_until(() -> mpi.status !== :starting, win)
             mt_size!(win)
-            panes = mt_rank_panes(win)
+            panes = mt_rank_panes(mpi)
             for view in panes
                 @test MT_GUI.send_bytes!(view, Vector{UInt8}(codeunits("println(\"up-\", ENV[\"OMPI_COMM_WORLD_RANK\"])\r"))) === true
             end
@@ -959,7 +957,7 @@ end
             # The job is still starting, so there is nothing to kill yet.
             @test mpi.status === :starting
             @test !MT_GUI.mpi_killable(mpi)
-            @test win.mpi_props["killable"] == false
+            @test mpi.props["killable"] == false
             @test_throws "cannot be killed while it is starting" MT_GUI.kill_mpi!(win, tab.id)
             @test mpi.status === :starting
             @test win.failure === nothing
@@ -1082,22 +1080,22 @@ mt_wrapper_pids(views) = [v.session.repl.source.connection.pid for v in views]
             old_pids = mt_wrapper_pids(mpi.views)
             @test MT_GUI.kill_mpi!(win, tab.id) === nothing
             @test mpi.status === :killed
-            @test win.mpi_props["killable"] == false
+            @test mpi.props["killable"] == false
 
             @test MT_GUI.restart_mpi!(win, tab.id) === nothing
             @test mpi.status === :starting
-            @test win.mpi_props["status"] == "starting"
-            @test win.mpi_props["message"] == "Restarting 3 MPI ranks…"
+            @test mpi.props["status"] == "starting"
+            @test mpi.props["message"] == "Restarting 3 MPI ranks…"
             mt_run_until(() -> mpi.status !== :starting, win)
             @test mpi.status === :running
             @test mpi.failure === nothing
-            @test win.mpi_props["status"] == "running"
-            @test win.mpi_props["killable"] == true
+            @test mpi.props["status"] == "running"
+            @test mpi.props["killable"] == true
             @test win.failure === nothing
 
             # The same panes, in the same order, with the ranks of the new job.
             @test [v.id for v in mpi.views] == ids
-            @test [v.id for v in mt_rank_panes(win)] == ids
+            @test [v.id for v in mt_rank_panes(mpi)] == ids
             @test [v.rank for v in mpi.views] == [0, 1, 2]
             @test [v.session.repl.source.connection.rank for v in mpi.views] == [0, 1, 2]
             @test mpi.job !== old_job
@@ -1139,7 +1137,7 @@ mt_wrapper_pids(views) = [v.session.repl.source.connection.pid for v in views]
             new_directory = mpi.job.directory
             @test MT_GUI.close_tab!(win, tab.id) === nothing
             @test isempty(win.tabs.tabs)
-            @test isempty(mt_rank_panes(win))
+            @test isempty(mt_rank_panes(mpi))
             @test !isdir(new_directory)
             @test mt_fake_processes_gone()
         finally
@@ -1169,10 +1167,10 @@ end
             mt_run_until(() -> mpi.status === :ended, win)
             @test all(MT_ReplSession.has_ended(v.session.repl) for v in mpi.views)
             @test all(v.session.repl.exit == MT_ReplSession.ExitInfo(0, 0) for v in mpi.views)
-            @test win.mpi_props["status"] == "ended"
-            @test win.mpi_props["message"] == "The MPI job has ended."
-            @test win.mpi_props["messageFailed"] == false
-            @test win.mpi_props["killable"] == false
+            @test mpi.props["status"] == "ended"
+            @test mpi.props["message"] == "The MPI job has ended."
+            @test mpi.props["messageFailed"] == false
+            @test mpi.props["killable"] == false
             @test !MT_GUI.mpi_killable(mpi)
             @test_throws "cannot be killed while it is ended" MT_GUI.kill_mpi!(win, tab.id)
             @test all(v.props["ended"] == true for v in mpi.views)
@@ -1347,18 +1345,18 @@ end
             @test mpi.status === :ended
             @test mpi.job === nothing
             @test mpi.failure === nothing
-            @test occursin("Could not restart 2 MPI ranks", win.mpi_props["message"])
-            @test win.mpi_props["messageFailed"] == true
-            @test win.mpi_props["panes"] == true
-            @test win.mpi_props["killable"] == false
-            @test [v.id for v in mt_rank_panes(win)] == ids
+            @test occursin("Could not restart 2 MPI ranks", mpi.props["message"])
+            @test mpi.props["messageFailed"] == true
+            @test mpi.props["panes"] == true
+            @test mpi.props["killable"] == false
+            @test [v.id for v in mt_rank_panes(mpi)] == ids
             @test occursin("before-failure", mt_text(mpi.views[1]))
             @test win.failure === nothing
 
             # Restart again with the normal wrappers, which succeeds.
             @test MT_GUI.restart_mpi!(win, tab.id) === nothing
             mt_run_until(() -> mpi.status === :running, win)
-            @test win.mpi_props["messageFailed"] == false
+            @test mpi.props["messageFailed"] == false
             @test all(mt_restart_texts(v) == [MT_ReplSession.UNEXITED_DESCRIPTION] for v in mpi.views)
             @test MT_GUI.send_bytes!(mpi.views[2], Vector{UInt8}(codeunits("works"))) === true
             mt_run_until(() -> occursin("works", mt_text(mpi.views[2])), win)
@@ -1411,7 +1409,7 @@ end
             one = mpi.views[2]
             MT_GUI.toggle_zoom_pane!(win, one)
             @test mpi.zoomed == 1
-            @test win.mpi_props["zoomed"] == true
+            @test mpi.props["zoomed"] == true
             @test mpi.targets == Set(0:2)
             @test [v.rank for v in MT_GUI.route_targets(mpi)] == [1]
             @test [v.session.visible for v in mpi.views] == [false, true, false]
@@ -1447,7 +1445,7 @@ end
             # A second zoom on the zoomed pane restores the grid and the routing to every rank.
             MT_GUI.toggle_zoom_pane!(win, one)
             @test mpi.zoomed === nothing
-            @test win.mpi_props["zoomed"] == false
+            @test mpi.props["zoomed"] == false
             @test all(v.session.visible for v in mpi.views)
             @test [v.props["zoomHidden"] for v in mpi.views] == [false, false, false]
             @test [v.props["zoomed"] for v in mpi.views] == [false, false, false]
@@ -1541,7 +1539,7 @@ end
             mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
 
             @test mpi.zoomed == 2
-            @test win.mpi_props["zoomed"] == true
+            @test mpi.props["zoomed"] == true
             @test [v.session.visible for v in mpi.views] == [false, false, true]
             @test [v.props["zoomHidden"] for v in mpi.views] == [true, true, false]
             @test [v.rank for v in MT_GUI.route_targets(mpi)] == [2]
@@ -1553,7 +1551,7 @@ end
 
             MT_GUI.toggle_zoom_pane!(win, mpi.views[3])
             @test all(v.session.visible for v in mpi.views)
-            @test win.mpi_props["zoomed"] == false
+            @test mpi.props["zoomed"] == false
         finally
             MT_GUI.shutdown!(win)
         end
@@ -1578,7 +1576,7 @@ end
                 MT_GUI.toggle_zoom_pane!(win, repl_tab.state)
             end
             @test mpi.zoomed === nothing
-            @test win.mpi_props["zoomed"] == false
+            @test mpi.props["zoomed"] == false
             @test all(v.session.visible for v in mpi.views)
             @test win.failure === nothing
         finally
@@ -1613,6 +1611,269 @@ end
             @test mpi.zoomed === nothing
             @test view.props["zoomed"] == false
             @test view.session.visible
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+# Size the panes of one MPI tab, as `mt_size!` does for the only MPI tab of a window.
+mt_size_tab!(mpi) = foreach(v -> MT_GUI.pane_sized!(v, 800, 400, 8, 16), mpi.views)
+
+# Whether every pane of `mpi` has been sized (see `mt_size!`).
+mt_sized(mpi) = all(occursin("resize 25 100", mt_text(v)) for v in mpi.views)
+
+@testset "MPI tabs: several tabs run their own jobs, each with its own rank count" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        directories = String[]
+        try
+            MT_GUI.launch_mpi!(win, 2)
+            MT_GUI.launch_mpi!(win, 3)
+            tab_a, tab_b = win.tabs.tabs
+            a, b = tab_a.state, tab_b.state
+            @test [MPIEnsemble.TabSet.tab_title(t) for t in win.tabs.tabs] == ["MPI", "MPI 2"]
+            @test (a.nranks, b.nranks) == (2, 3)
+            @test win.props["selected"] == tab_b.id
+            @test a.props["columns"] == 2
+            @test b.props["columns"] == 2
+            mt_run_until(() -> a.status !== :starting && b.status !== :starting, win)
+            @test a.status === :running
+            @test b.status === :running
+            @test length(a.views) == 2
+            @test length(b.views) == 3
+            @test [v.rank for v in a.views] == [0, 1]
+            @test [v.rank for v in b.views] == [0, 1, 2]
+            @test a.job.directory != b.job.directory
+            append!(directories, [a.job.directory, b.job.directory])
+            @test length(Set(v.id for v in vcat(a.views, b.views))) == 5
+            @test Base.values(a.rank_panes)[] == a.views
+            @test Base.values(b.rank_panes)[] == b.views
+            @test a.props["panes"] == true
+            @test b.props["panes"] == true
+            # Only the selected tab's panes are shown.
+            @test all(!v.session.visible for v in a.views)
+            @test all(v.session.visible for v in b.views)
+            a_pids = mt_wrapper_pids(a.views)
+            b_pids = mt_wrapper_pids(b.views)
+            MT_GUI.shutdown!(win)
+            @test timedwait(() -> all(!mt_exists(p) for p in vcat(a_pids, b_pids)), 10; pollint = 0.05) === :ok
+            @test mt_fake_processes_gone()
+            @test all(!isdir(d) for d in directories)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tabs: input to a pane reaches only the ranks of its own tab" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.launch_mpi!(win, 2)
+            MT_GUI.launch_mpi!(win, 3)
+            a, b = (t.state for t in win.tabs.tabs)
+            mt_run_until(() -> a.status !== :starting && b.status !== :starting, win)
+            mt_size_tab!(a)
+            mt_size_tab!(b)
+            mt_run_until(() -> mt_sized(a) && mt_sized(b), win)
+
+            @test MT_GUI.key_input!(win, b.views[2], 0, "only-b", 0) === true
+            mt_run_until(() -> mt_all_show(b.views, "only-b"), win)
+            @test MT_GUI.key_input!(win, a.views[1], 0, "only-a", 0) === true
+            mt_run_until(() -> mt_all_show(a.views, "only-a"), win)
+            for v in a.views
+                @test !occursin("only-b", mt_text(v))
+            end
+            for v in b.views
+                @test !occursin("only-a", mt_text(v))
+            end
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tabs: killing and restarting one tab leaves the other job running" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.launch_mpi!(win, 2)
+            MT_GUI.launch_mpi!(win, 2)
+            tab_a, tab_b = win.tabs.tabs
+            a, b = tab_a.state, tab_b.state
+            mt_run_until(() -> a.status !== :starting && b.status !== :starting, win)
+            mt_size_tab!(a)
+            mt_size_tab!(b)
+            mt_run_until(() -> mt_sized(a) && mt_sized(b), win)
+            b_job = b.job
+            a_pane_ids = [v.id for v in a.views]
+            b_pane_ids = [v.id for v in b.views]
+            a_pids = mt_wrapper_pids(a.views)
+            b_pids = mt_wrapper_pids(b.views)
+            a_directory = a.job.directory
+
+            @test MT_GUI.kill_mpi!(win, tab_a.id) === nothing
+            @test a.status === :killed
+            @test b.status === :running
+            @test b.job === b_job
+            @test !process_exited(b_job.process)
+            @test timedwait(() -> all(!mt_exists(p) for p in a_pids), 10; pollint = 0.05) === :ok
+            @test !isdir(a_directory)
+            @test all(mt_exists(p) for p in b_pids)
+
+            # The other tab's ranks still take input while this one is killed.
+            @test MT_GUI.key_input!(win, b.views[1], 0, "b-while-a-killed", 0) === true
+            mt_run_until(() -> mt_all_show(b.views, "b-while-a-killed"), win)
+            @test b.status === :running
+
+            @test MT_GUI.restart_mpi!(win, tab_a.id) === nothing
+            mt_run_until(() -> a.status === :running, win)
+            @test [v.id for v in a.views] == a_pane_ids
+            @test b.status === :running
+            @test [v.id for v in b.views] == b_pane_ids
+            @test b.job === b_job
+            @test MT_GUI.key_input!(win, a.views[2], 0, "a-after-restart", 0) === true
+            mt_run_until(() -> mt_all_show(a.views, "a-after-restart"), win)
+            @test !occursin("a-after-restart", mt_text(b.views[1]))
+            @test win.failure === nothing
+            a_restarted_directory = a.job.directory
+            b_directory = b.job.directory
+
+            # Closing the window ends both jobs, and removes the socket directory of each.
+            MT_GUI.shutdown!(win)
+            @test mt_fake_processes_gone()
+            @test !isdir(a_directory)
+            @test !isdir(a_restarted_directory)
+            @test !isdir(b_directory)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tabs: closing one tab shuts down only its job, and the other continues" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.launch_mpi!(win, 2)
+            MT_GUI.launch_mpi!(win, 3)
+            tab_a, tab_b = win.tabs.tabs
+            a, b = tab_a.state, tab_b.state
+            mt_run_until(() -> a.status !== :starting && b.status !== :starting, win)
+            mt_size_tab!(a)
+            mt_size_tab!(b)
+            mt_run_until(() -> mt_sized(a) && mt_sized(b), win)
+            a_directory = a.job.directory
+            b_job = b.job
+            a_pids = mt_wrapper_pids(a.views)
+            b_pids = mt_wrapper_pids(b.views)
+            a_pane_ids = [v.id for v in a.views]
+
+            MT_GUI.close_tab!(win, tab_a.id)
+            @test [t.id for t in win.tabs.tabs] == [tab_b.id]
+            @test win.props["selected"] == tab_b.id
+            @test isempty(a.views)
+            @test isempty(Base.values(a.rank_panes)[])
+            @test all(!haskey(win.views, id) for id in a_pane_ids)
+            @test a.job === nothing
+            @test timedwait(() -> all(!mt_exists(p) for p in a_pids), 10; pollint = 0.05) === :ok
+            @test !isdir(a_directory)
+            @test all(mt_exists(p) for p in b_pids)
+            @test !process_exited(b_job.process)
+            @test b.status === :running
+            @test all(v.session.visible for v in b.views)
+            @test win.props["closeRequest"] == 0
+
+            # The remaining tab still takes input, and its panes are still fed.
+            @test MT_GUI.key_input!(win, b.views[3], 0, "after-close", 0) === true
+            mt_run_until(() -> mt_all_show(b.views, "after-close"), win)
+            @test win.failure === nothing
+
+            # Closing a tab that is not selected keeps the selection on the other tab.
+            MT_GUI.launch_mpi!(win, 1)
+            tab_c = win.tabs.tabs[2]
+            c = tab_c.state
+            mt_run_until(() -> c.status !== :starting, win)
+            MT_GUI.select_tab!(win, tab_c.id)
+            MT_GUI.close_tab!(win, tab_b.id)
+            @test [t.id for t in win.tabs.tabs] == [tab_c.id]
+            @test win.props["selected"] == tab_c.id
+            @test c.status === :running
+            @test !process_exited(c.job.process)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tabs: zoom and selection are kept for each tab" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.launch_mpi!(win, 3)
+            MT_GUI.launch_mpi!(win, 2)
+            tab_a, tab_b = win.tabs.tabs
+            a, b = tab_a.state, tab_b.state
+            mt_run_until(() -> a.status !== :starting && b.status !== :starting, win)
+            mt_size_tab!(a)
+            mt_size_tab!(b)
+            mt_run_until(() -> mt_sized(a) && mt_sized(b), win)
+
+            # Zoom rank 0 of the first tab. The second tab is not zoomed, and keeps all its panes.
+            MT_GUI.select_tab!(win, tab_a.id)
+            MT_GUI.toggle_zoom_pane!(win, a.views[1])
+            @test a.zoomed == 0
+            @test a.props["zoomed"] == true
+            @test b.zoomed === nothing
+            @test b.props["zoomed"] == false
+            @test [v.props["zoomHidden"] for v in a.views] == [false, true, true]
+            @test a.views[1].session.visible
+            @test !a.views[2].session.visible
+            @test !a.views[3].session.visible
+            @test [v.rank for v in MT_GUI.route_targets(a)] == [0]
+            @test [v.rank for v in MT_GUI.route_targets(b)] == [0, 1]
+
+            # Selecting the second tab shows its panes, all of them, and keeps the zoom of the first.
+            MT_GUI.select_tab!(win, tab_b.id)
+            @test all(v.session.visible for v in b.views)
+            @test all(!v.session.visible for v in a.views)
+            @test all(v.props["zoomHidden"] == false for v in b.views)
+            @test a.zoomed == 0
+            MT_GUI.select_tab!(win, tab_a.id)
+            @test a.views[1].session.visible
+            @test !a.views[2].session.visible
+
+            # Select rank 1 of the second tab. The first tab's selection is untouched, and it is not dimmed.
+            MT_GUI.toggle_rank_pane!(win, b.views[2])
+            @test b.selected == 1
+            @test a.selected === nothing
+            @test [v.props["selected"] for v in b.views] == [false, true]
+            @test [v.props["dimmed"] for v in b.views] == [true, false]
+            @test [v.rank for v in MT_GUI.route_targets(b)] == [1]
+            @test [v.props["dimmed"] for v in a.views] == [false, true, true]
+            @test a.views[1].props["selected"] == false
+
+            # Unzoom the first tab. Its selection is still empty, and the second tab keeps its selection.
+            MT_GUI.toggle_zoom_pane!(win, a.views[1])
+            @test a.zoomed === nothing
+            @test a.props["zoomed"] == false
+            @test all(v.session.visible for v in a.views)
+            @test all(v.props["zoomHidden"] == false for v in a.views)
+            @test b.selected == 1
+            @test b.zoomed === nothing
+            @test [v.rank for v in MT_GUI.route_targets(b)] == [1]
+
+            # Zoom in the second tab, which hides its other panes only.
+            MT_GUI.toggle_zoom_pane!(win, b.views[2])
+            @test b.zoomed == 1
+            @test [v.props["zoomHidden"] for v in b.views] == [true, false]
+            @test a.zoomed === nothing
+            @test all(v.props["zoomHidden"] == false for v in a.views)
             @test win.failure === nothing
         finally
             MT_GUI.shutdown!(win)

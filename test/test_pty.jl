@@ -211,9 +211,7 @@ end
     s = Pty.spawn(Cmd(["sleep", "30"]))
     try
         pid = getpid(s.process)
-        # `spawn` returns once `setsid` has started, so wait for it to exec `sleep`.
-        timedwait(() -> read("/proc/$pid/comm", String) == "sleep\n", 5; pollint = 0.01) === :ok ||
-            error("the child is $(strip(read("/proc/$pid/comm", String))), not sleep")
+        @test read("/proc/$pid/comm", String) == "sleep\n"
         # Fields after the command name: state, parent pid, process group, session.
         fields = split(split(read("/proc/$pid/stat", String), ')'; limit = 2)[2])
         @test parse(Int, fields[2]) == getpid()

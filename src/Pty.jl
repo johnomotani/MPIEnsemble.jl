@@ -95,6 +95,26 @@ function require_command(name::AbstractString)
     return nothing
 end
 
+# Return once `proc` has replaced `setsid` and `setpriv` with the command. Until then the
+# parent-death signal is not set: `setpriv` sets it just before it execs the command, and a signal
+# is not sent when the parent has already died. Returns early if the process has exited.
+function wait_for_exec(proc::Base.Process)
+    helpers = (realpath(Sys.which("setsid")), realpath(Sys.which("setpriv")))
+    exe_link = "/proc/$(getpid(proc))/exe"
+    while !process_exited(proc)
+        exe = try
+            readlink(exe_link)
+        catch err
+            # The /proc entry is gone once the process has exited and been reaped.
+            err isa Base.IOError && err.code == Base.UV_ENOENT || rethrow()
+            return nothing
+        end
+        exe in helpers || return nothing
+        sleep(0.0005)
+    end
+    return nothing
+end
+
 """
     spawn(cmd::Cmd; rows = 24, cols = 80) -> Session
 
@@ -126,6 +146,7 @@ function spawn(cmd::Cmd; rows::Integer = 24, cols::Integer = 80)
         # which then execs `cmd`: `setsid` and `setpriv` both exec, so no extra process remains.
         wrapped = Cmd(Cmd(["setsid", "-c", "setpriv", "--pdeathsig", "KILL", cmd.exec...]); env = cmd.env, dir = cmd.dir)
         proc = run(wrapped, RawFD(slavefd), RawFD(slavefd), RawFD(slavefd); wait = false)
+        wait_for_exec(proc)
         return Session(master, masterfd, proc, ReentrantLock(), false)
     catch
         master === nothing ? close_fd(masterfd) : close(master)

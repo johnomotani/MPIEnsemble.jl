@@ -10,7 +10,7 @@ module PtyOutput
 using ..Pty: read_output!, Session
 using ..VTParse: Terminal, take_replies!
 
-export Output, start_reader, feed_chunks!, wait_reader!, check_error, finished, start_writer,
+export Output, start_reader, start_reader_from, feed_chunks!, wait_reader!, check_error, finished, start_writer,
     queue_replies!, session_ended
 
 # Chunks held between the reader and the consumer. A chunk is what one read of the pseudo-terminal
@@ -42,18 +42,34 @@ output is the `-1` that `Pty.read_output!` returns. Any error is stored in the r
 `check_error`.
 """
 function start_reader(session)
+    buf = Vector{UInt8}(undef, READ_SIZE)
+    return start_reader_from() do
+        n = read_output!(session, buf)
+        n < 0 && return nothing
+        return n == 0 ? UInt8[] : buf[1:n]
+    end
+end
+
+"""
+    start_reader_from(read_chunk) -> Output
+
+Start a task that calls `read_chunk()` repeatedly and queues each chunk it returns, until `read_chunk`
+returns `nothing`, which ends the output. An empty chunk means that none is ready: the task pauses
+briefly and calls again. An error thrown by `read_chunk` is stored in the returned `Output`, for
+`check_error`.
+"""
+function start_reader_from(read_chunk)
     chunks = Channel{Vector{UInt8}}(MAX_QUEUED_CHUNKS)
     err = Ref{Any}(nothing)
     task = @async begin
-        buf = Vector{UInt8}(undef, READ_SIZE)
         try
             while true
-                n = read_output!(session, buf)
-                n < 0 && break
-                if n == 0
+                chunk = read_chunk()
+                chunk === nothing && break
+                if isempty(chunk)
                     sleep(READ_POLL_INTERVAL)
                 else
-                    put!(chunks, buf[1:n])
+                    put!(chunks, chunk)
                 end
             end
         catch e
@@ -131,7 +147,7 @@ were queued, until `input` is closed. A write error is stored in `errors[]`, whi
 unless the session is closed, the child has closed its side (see `session_ended`), or `closing()`
 returns true. Those errors are dropped: the session has ended, or the caller no longer wants output.
 """
-function start_writer(session::Session, input::Channel{Vector{UInt8}}, errors::Base.RefValue{Any}, closing)
+function start_writer(session::Session, input::Channel, errors::Base.RefValue{Any}, closing)
     return @async begin
         try
             for bytes in input
@@ -161,7 +177,7 @@ input from the user. If `input` is closed or `writer` has finished, the replies 
 window is closing or the child has gone, so nothing can read them. A write error other than the
 child's end is kept by the writer for its caller, as in `start_writer`.
 """
-function queue_replies!(input::Channel{Vector{UInt8}}, writer, term::Terminal)
+function queue_replies!(input::Channel, writer, term::Terminal)
     bytes = take_replies!(term)
     isempty(bytes) && return nothing
     (isopen(input) && !istaskdone(writer)) || return nothing

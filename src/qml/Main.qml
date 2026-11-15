@@ -1,12 +1,16 @@
 import QtQuick
 import QtQuick.Controls as Controls
+import QtQuick.Layouts
 import jlqml
 
-// Top-level window: a menu bar, then a tab bar above a stack holding one Pane per tab. `tabModel` is
-// built by Julia, with the roles tabId, tabTitle, ended, rowModel and props. Only the pane of the
-// selected tab is visible, and only a visible pane takes input or is refilled. Julia.windowClosed() is
-// called when the window is closed; the Julia event loop in Gui.jl then returns. Julia asks for the
-// window to close by changing `closeRequest`, once its last tab has closed.
+// Top-level window: a menu bar, then a tab bar above a stack. The stack holds a Pane for each REPL pane
+// (`replModel`), of which only the one in the selected tab is visible, and the MPI tab's grid of rank
+// panes (over `rankModel`), which is shown while the MPI tab is selected. `tabModel` is
+// built by Julia, with the roles tabId, tabTitle and ended. Only a visible pane takes input or is
+// refilled. Julia.windowClosed() is called when the window is closed; the Julia event loop in Gui.jl
+// then returns. Julia asks for the window to close by changing `closeRequest`, once its last tab has
+// closed, or after the rank dialog is cancelled. When Julia has no rank count (`windowProps.askRanks`),
+// RankDialog opens at start-up.
 //
 // ApplicationWindow places the menu bar above the window contents, so the tab bar is anchored to the
 // top of the contents.
@@ -19,12 +23,24 @@ Controls.ApplicationWindow {
     color: "#1a1b26"
 
     readonly property int selectedId: windowProps.selected
+    readonly property int selectedPane: windowProps.selectedPane
+    readonly property string selectedKind: windowProps.selectedKind
     readonly property int closeRequest: windowProps.closeRequest
 
     onClosing: Julia.windowClosed()
     onCloseRequestChanged: {
         if (closeRequest > 0)
             Qt.callLater(win.close)
+    }
+
+    // Asks for the rank count when Julia has none. The dialog reports its answer to Julia.
+    RankDialog {
+        id: rankDialog
+    }
+
+    Component.onCompleted: {
+        if (windowProps.askRanks)
+            rankDialog.open()
     }
 
     // Placeholder menus. Each holds one disabled item until its feature is implemented.
@@ -197,14 +213,81 @@ Controls.ApplicationWindow {
         anchors.top: tabBar.bottom
         anchors.bottom: parent.bottom
 
+        // The roles of the pane model are the required properties of Pane.
         Repeater {
-            model: tabModel
+            model: replModel
 
-            // The roles of the tab model are the required properties of Pane.
             delegate: Pane {
                 anchors.fill: parent
                 anchors.margins: 8
-                visible: tabId === win.selectedId
+                visible: paneId === win.selectedPane
+            }
+        }
+
+        // The MPI tab: one Pane per MPI rank, in a grid of `mpiProps.columns` columns whose cells are of
+        // equal size. While the job is starting, and when it has failed, the tab shows `mpiProps.message`
+        // instead of the grid. Each rank pane is visible only while the tab is selected, so that it is sized
+        // and refilled only then. One rank pane has the keyboard focus at a time: a click on a pane gives it
+        // the focus (Pane.qml does this), and that pane keeps the focus when the tab is hidden and shown
+        // again. The first pane has the focus when the tab is first shown.
+        Item {
+            id: mpiTab
+            anchors.fill: parent
+            anchors.margins: 8
+            visible: win.selectedKind === "mpi"
+
+            // Index of the rank pane that has the focus last.
+            property int focusIndex: 0
+
+            function focusCurrent() {
+                if (!mpiTab.visible)
+                    return
+                var cell = mpiRepeater.itemAt(mpiTab.focusIndex)
+                if (cell)
+                    cell.forceActiveFocus()
+            }
+
+            onVisibleChanged: focusCurrent()
+
+            Text {
+                x: 24
+                width: mpiTab.width - 48
+                y: (mpiTab.height - height) / 2
+                visible: mpiProps.status !== "running"
+                text: mpiProps.message
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                color: mpiProps.status === "failed" ? "#f7768e" : "#c0caf5"
+                font.pixelSize: 16
+            }
+
+            GridLayout {
+                anchors.fill: parent
+                visible: mpiProps.status === "running"
+                columns: mpiProps.columns
+                rowSpacing: 8
+                columnSpacing: 8
+                uniformCellWidths: true
+                uniformCellHeights: true
+
+                Repeater {
+                    id: mpiRepeater
+                    model: rankModel
+                    onCountChanged: mpiTab.focusCurrent()
+
+                    delegate: Pane {
+                        required property int index
+
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        rankPane: true
+                        visible: mpiTab.visible
+                        onActiveFocusChanged: {
+                            if (activeFocus)
+                                mpiTab.focusIndex = index
+                        }
+                    }
+                }
             }
         }
     }

@@ -1,14 +1,19 @@
 import QtQuick
 import jlqml
 
-// REPL pane for one tab: a ListView over the tab's row model, one HTML row per item. Main.qml creates
-// one per tab and sets `tabId`, `rowModel` and `props` from the tab model. Calls to Julia name the tab
-// with `tabId` first, except `isPasteChord`, which only looks at the key. A pane is visible only when
-// its tab is selected. The row height and the column width are measured with TextMetrics and reported
-// to Julia, which sizes the terminal in cells. Julia decides the window position. This file reports
-// user scrolling, applies the offset that Julia returns after a refill. When Julia says the pane is
-// following, the view moves to the row Julia names (the cursor row, when it is above the end of the
-// output) or to the end.
+// Terminal pane: a ListView over the pane's row model, one HTML row per item. Each pane is a REPL pane
+// or the pane of one MPI rank (both in Main.qml), and sets `paneId`, `rowModel` and `props` from the model
+// that repeats it. Calls to Julia name the pane with `paneId` first, except `isPasteChord`,
+// which only looks at the key. The owner sets `visible` for the pane, and a pane that is hidden is not
+// sized or refilled. The row height and the column width are measured with TextMetrics and reported to
+// Julia, which sizes the terminal in cells. Julia decides the window position. This file reports user
+// scrolling, applies the offset that Julia returns after a refill. When Julia says the pane is following,
+// the view moves to the row Julia names (the cursor row, when it is above the end of the output) or to
+// the end.
+//
+// A REPL pane takes the keyboard when it is shown. A rank pane (`rankPane`) takes it only when its owner
+// gives it the focus, and its border is dim while it does not have the focus. A rank pane cannot be
+// restarted, so its end prompt has no Restart button and Return does nothing there.
 //
 // The pane holds keyboard focus. Each key press is passed to Julia, which writes the bytes for the
 // child process; the event is accepted only when Julia reports that it sent something. Ctrl+Shift+V
@@ -25,13 +30,16 @@ import jlqml
 Rectangle {
     id: pane
     color: "#24283b"
-    border.color: "#7aa2f7"
+    border.color: rankPane && !activeFocus ? "#3b4261" : "#7aa2f7"
     border.width: 2
     radius: 4
 
-    required property int tabId
+    required property int paneId
     required property var rowModel
     required property var props
+    // True for the pane of an MPI rank. Such a pane is not given the focus when it is shown, its border is
+    // dim without the focus, and it has no Restart button.
+    property bool rankPane: false
 
     readonly property real cellW: metrics.advanceWidth / 10
     readonly property real cellH: Math.ceil(metrics.height)
@@ -47,7 +55,7 @@ Rectangle {
     // Sizes the tab's terminal. A hidden pane reports nothing: it is sized when it is shown.
     function reportSize() {
         if (visible && view.width > 0 && view.height > 0)
-            Julia.paneSized(tabId, view.width, view.height, cellW, cellH)
+            Julia.paneSized(paneId, view.width, view.height, cellW, cellH)
     }
 
     function snapToEnd() {
@@ -92,10 +100,12 @@ Rectangle {
             snapToEnd()
     }
 
-    // Shown panes take the keyboard. A pane that is hidden is sized when it is shown again.
+    // A shown pane is sized, and a REPL pane takes the keyboard. A pane that is hidden is sized when it
+    // is shown again.
     function show() {
         reportSize()
-        forceActiveFocus()
+        if (!rankPane)
+            forceActiveFocus()
     }
 
     Component.onCompleted: {
@@ -115,27 +125,27 @@ Rectangle {
     }
 
     Keys.onPressed: function (event) {
-        // After the REPL has ended, Return restarts it. Other keys are not sent.
-        if (props.ended && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
-            Julia.restartSession(pane.tabId)
+        // After a REPL has ended, Return restarts it. Other keys are not sent. A rank cannot be restarted.
+        if (!rankPane && props.ended && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+            Julia.restartSession(pane.paneId)
             event.accepted = true
             return
         }
         // Jump keys scroll the view and are not sent to the child. They keep the selection.
-        var row = Julia.scrollKey(pane.tabId, event.key, event.modifiers)
+        var row = Julia.scrollKey(pane.paneId, event.key, event.modifiers)
         if (row >= 0) {
             pane.applyRow(row)
             event.accepted = true
             return
         }
         if (!pane.isModifierKey(event.key))
-            Julia.clearSelection(pane.tabId)
+            Julia.clearSelection(pane.paneId)
         if (Julia.isPasteChord(event.key, event.modifiers)) {
             pasteBuffer.text = ""
             pasteBuffer.paste()
-            event.accepted = Julia.pasteText(pane.tabId, pasteBuffer.text)
+            event.accepted = Julia.pasteText(pane.paneId, pasteBuffer.text)
         } else {
-            event.accepted = Julia.keyPressed(pane.tabId, event.key, event.text, event.modifiers)
+            event.accepted = Julia.keyPressed(pane.paneId, event.key, event.text, event.modifiers)
         }
     }
 
@@ -165,7 +175,7 @@ Rectangle {
             var count = Math.ceil(height / pane.cellH)
             // Within one row of the end counts as the end: a wheel scroll can stop just short of it.
             var atEnd = contentY >= contentHeight - height - pane.cellH
-            var shift = Julia.userScrolled(pane.tabId, first, count, atEnd)
+            var shift = Julia.userScrolled(pane.paneId, first, count, atEnd)
             if (shift != 0) {
                 // The matrix moved by `shift` rows; keep the same rows in view.
                 syncing = true
@@ -232,7 +242,7 @@ Rectangle {
                     grabOffset = mouse.y - t
                 } else {
                     dragging = false
-                    pane.applyRow(Julia.pageView(pane.tabId, mouse.y < t ? -1 : 1))
+                    pane.applyRow(Julia.pageView(pane.paneId, mouse.y < t ? -1 : 1))
                 }
             }
 
@@ -240,7 +250,7 @@ Rectangle {
                 if (!dragging || bar.room <= 0)
                     return
                 var f = Math.max(0, Math.min(1, (mouse.y - grabOffset) / bar.room))
-                pane.applyRow(Julia.scrollToFraction(pane.tabId, f))
+                pane.applyRow(Julia.scrollToFraction(pane.paneId, f))
             }
 
             onReleased: dragging = false
@@ -273,7 +283,7 @@ Rectangle {
                 clicks = 0
                 lastTime = 0
                 dragSelects = true
-                Julia.selectionExtendStart(pane.tabId, slot, col)
+                Julia.selectionExtendStart(pane.paneId, slot, col)
                 return
             }
             var now = Date.now()
@@ -284,22 +294,22 @@ Rectangle {
             lastY = mouse.y
             dragSelects = clicks === 1
             if (clicks === 1)
-                Julia.selectionStart(pane.tabId, slot, col)
+                Julia.selectionStart(pane.paneId, slot, col)
             else if (clicks === 2)
-                Julia.selectWord(pane.tabId, slot, col)
+                Julia.selectWord(pane.paneId, slot, col)
             else
-                Julia.selectLine(pane.tabId, slot)
+                Julia.selectLine(pane.paneId, slot)
         }
 
         onPositionChanged: function (mouse) {
             dragX = mouse.x
             dragY = mouse.y
             if (pressed && dragSelects)
-                Julia.selectionExtend(pane.tabId, pane.slotAt(mouse.y), pane.colAt(mouse.x))
+                Julia.selectionExtend(pane.paneId, pane.slotAt(mouse.y), pane.colAt(mouse.x))
         }
 
         onReleased: function (mouse) {
-            Julia.selectionEnd(pane.tabId)
+            Julia.selectionEnd(pane.paneId)
         }
 
         // While a drag is above or below the view, scroll one row per tick and extend the selection
@@ -315,12 +325,39 @@ Rectangle {
                 view.contentY = Math.max(0, Math.min(view.contentY + dir * pane.cellH, maxY))
                 var first = Math.floor(view.contentY / pane.cellH) + 1
                 var last = Math.floor((view.contentY + view.height - 1) / pane.cellH) + 1
-                Julia.selectionExtend(pane.tabId, dir < 0 ? first : last, pane.colAt(selector.dragX))
+                Julia.selectionExtend(pane.paneId, dir < 0 ? first : last, pane.colAt(selector.dragX))
             }
         }
     }
-    // Shown after the REPL has ended. It lies over the bottom of the output, which stays scrollable and
-    // selectable beneath it. Return also restarts (see Keys.onPressed).
+    // The MPI rank of a rank pane, at the top-right of the output, just left of the scrollbar. It takes no
+    // mouse input, so presses and drags reach the output beneath it, and it is not part of the text selection.
+    Rectangle {
+        id: rankBadge
+        readonly property real padX: 5
+        readonly property real padY: 1
+        readonly property real minWidth: 20
+        visible: props.rankLabel !== ""
+        enabled: false
+        anchors.top: parent.top
+        anchors.topMargin: 6
+        anchors.right: bar.left
+        anchors.rightMargin: 4
+        width: Math.max(minWidth, badgeText.implicitWidth + 2 * padX)
+        height: badgeText.implicitHeight + 2 * padY
+        radius: 4
+        color: "#cc1f2335"
+
+        Text {
+            id: badgeText
+            anchors.centerIn: parent
+            text: props.rankLabel
+            color: "#a9b1d6"
+            font.pixelSize: 13
+        }
+    }
+
+    // Shown after the REPL has ended, or after a rank's connection has failed. It lies over the bottom of the
+    // output, which stays scrollable and selectable beneath it. Return also restarts (see Keys.onPressed).
     Rectangle {
         id: endPrompt
         visible: props.ended
@@ -337,7 +374,7 @@ Rectangle {
         Text {
             anchors.left: parent.left
             anchors.leftMargin: 12
-            anchors.right: restartButton.left
+            anchors.right: rankPane ? parent.right : restartButton.left
             anchors.rightMargin: 12
             anchors.verticalCenter: parent.verticalCenter
             text: props.exitText
@@ -348,6 +385,7 @@ Rectangle {
 
         Rectangle {
             id: restartButton
+            visible: !pane.rankPane
             anchors.right: parent.right
             anchors.rightMargin: 6
             anchors.verticalCenter: parent.verticalCenter
@@ -369,7 +407,7 @@ Rectangle {
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton
                 onPressed: pane.forceActiveFocus()
-                onClicked: Julia.restartSession(pane.tabId)
+                onClicked: Julia.restartSession(pane.paneId)
             }
         }
     }

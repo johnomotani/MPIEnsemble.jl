@@ -17,7 +17,7 @@ import ..ReplSession
 import ..ReplPane
 import ..TabSet
 using ..ReplSession: describe_exit, has_ended, is_started
-using ..MPIEnsemble: check_tall_rows
+using ..MPIEnsemble: check_tall_rows, check_rank_count
 using ..VTParse: application_cursor, bracketed_paste
 using ..KeyMap: key_bytes, paste_bytes, is_paste_chord
 using ..PaneModel: follow_row, select_start!, select_extend!, select_extend_start!, select_end!,
@@ -48,8 +48,9 @@ mutable struct TabView
 end
 
 # State of the window. `views` maps the ids of the open tabs to their views; `tab_rows` is the tab bar's
-# model, with the same order as `tabs`. `props` holds `selected` (the id of the selected tab) and
-# `closeRequest`, which QML reads to close the window once the last tab has closed.
+# model, with the same order as `tabs`. `props` holds `selected` (the id of the selected tab),
+# `closeRequest`, which QML reads to close the window once the last tab has closed, and `askRanks`,
+# which is true while the rank dialog is to be shown.
 mutable struct WindowState
     const tabs::TabSet.Tabs
     const views::Dict{Int, TabView}
@@ -57,6 +58,8 @@ mutable struct WindowState
     const props::QML.JuliaPropertyMap
     const tall_rows::Union{Nothing, Int}
     const startup_input::String
+    # Number of MPI ranks, or `nothing` until the rank dialog gives one.
+    rank_count::Union{Nothing, Int}
     startup_pending::Bool
     # Ids of tabs whose close was requested. They are closed by the event loop, not by the QML call.
     const closing::Vector{Int}
@@ -66,10 +69,12 @@ mutable struct WindowState
     offset::Int
 end
 
-function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, Int})
+function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, Int},
+        rank_count::Union{Nothing, Int})
     props = QML.JuliaPropertyMap()
     props["selected"] = 0
     props["closeRequest"] = 0
+    props["askRanks"] = rank_count === nothing
     rows = QML.JuliaItemModel(TabSet.Tab[], false)
     QML.addrole!(rows, "tabId", t -> t.id)
     QML.addrole!(rows, "tabTitle", t -> TabSet.tab_label(t, has_ended(view_of(t).session.repl)))
@@ -77,7 +82,7 @@ function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, In
     QML.addrole!(rows, "rowModel", t -> QML.QVariant(view_of(t).model))
     QML.addrole!(rows, "props", t -> QML.QVariant(view_of(t).props.propertymap))
     return WindowState(TabSet.Tabs(), Dict{Int, TabView}(), rows, props, tall_rows, String(startup_input),
-        true, Int[], nothing, 0)
+        rank_count, true, Int[], nothing, 0)
 end
 
 view_of(tab::TabSet.Tab)::TabView = tab.state
@@ -136,11 +141,17 @@ function sync_props!(view::TabView)
 end
 
 """
-    run_single_repl(; startup_input = "", tall_rows = nothing)
+    run_single_repl(; startup_input = "", tall_rows = nothing, rank_count = nothing)
 
 Open the window with one tab, which runs a Julia REPL, and run the Qt event loop on the calling thread
 until the window is closed. Must be called from the main thread, not from an `@async` task. Throws an
 error if a window is already open in this process.
+
+`rank_count` is the number of MPI ranks, or `nothing`. A count is recorded in the window state and read
+with `rank_count`; no MPI ranks are launched. Without a count, the window first shows a modal dialog
+that asks for one. Its OK button is enabled only for a whole number of 1 or more, and records the count.
+Cancel, or Escape, closes the window, and this function then returns without a count. An invalid
+`rank_count` throws `ArgumentError`.
 
 Each tab is an independent REPL with its own pane, output, scrollback, selection, scrollbar and restart
 prompt. The tab bar at the top of the window lists the tabs as "Julia 1", "Julia 2", and so on, in the
@@ -189,10 +200,11 @@ Each log line is one row of the pane: a line wider than the pane is cut off at i
 An error from a tab's reader or writer task, or from a QML call, is rethrown by this function once the
 window has closed.
 """
-function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing)
+function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing, rank_count = nothing)
     tall = check_tall_rows(tall_rows)
+    ranks = check_rank_count(rank_count)
     WINDOW_OPEN[] && error("the MPIEnsemble window is already open in this process")
-    win = WindowState(startup_input, tall)
+    win = WindowState(startup_input, tall, ranks)
     register_functions!(win)
     WINDOW_OPEN[] = true
     try
@@ -209,6 +221,8 @@ end
 # Each QML function is registered once. Functions that take a tab id run `tab_call` or `pane_call`.
 function register_functions!(win::WindowState)
     QML.qmlfunction("windowClosed", () -> (WINDOW_OPEN[] = false; nothing))
+    QML.qmlfunction("setRankCount", n -> guarded(() -> set_rank_count!(win, Int(n)), win, nothing))
+    QML.qmlfunction("cancelRankDialog", () -> guarded(() -> cancel_rank_dialog!(win), win, nothing))
     QML.qmlfunction("newTab", () -> guarded(() -> new_tab!(win), win, nothing))
     QML.qmlfunction("selectTab", id -> tab_call(view -> select_tab!(win, Int(id)), win, id, nothing))
     QML.qmlfunction("closeTab", id -> tab_call(view -> request_close!(win, Int(id)), win, id, nothing))
@@ -350,6 +364,25 @@ function show_selection!(win::WindowState, previous::Int)
         ReplPane.set_visible!(win.views[current].session, true)
     end
     win.props["selected"] = current
+    return nothing
+end
+
+# The number of MPI ranks given to the window, or `nothing` while none has been given.
+rank_count(win::WindowState) = win.rank_count
+
+# Record the count given in the rank dialog. The window must not have a count already.
+function set_rank_count!(win::WindowState, n::Integer)
+    win.rank_count === nothing || error("the window already has a rank count of $(win.rank_count)")
+    win.rank_count = check_rank_count(n)
+    win.props["askRanks"] = false
+    return nothing
+end
+
+# The rank dialog was cancelled: no count is recorded and the window is closed.
+function cancel_rank_dialog!(win::WindowState)
+    win.rank_count === nothing || error("the window already has a rank count of $(win.rank_count)")
+    win.props["askRanks"] = false
+    win.props["closeRequest"] = win.props["closeRequest"] + 1
     return nothing
 end
 

@@ -41,16 +41,26 @@ function check_tall_rows(tall_rows)
     return Int(tall_rows)
 end
 
+# `rank_count` must be `nothing` or a positive integer. Its value is returned as an `Int`, or `nothing`.
+function check_rank_count(rank_count)
+    rank_count === nothing && return nothing
+    if !(rank_count isa Integer) || rank_count isa Bool || rank_count < 1
+        throw(ArgumentError("rank count must be a positive integer, got $(repr(rank_count))"))
+    end
+    return Int(rank_count)
+end
+
 """
-    run_single_repl(; startup_input = "", tall_rows = nothing) -> Nothing
+    run_single_repl(; tall_rows = nothing, rank_count = nothing) -> Nothing
 
 Open the window, with one REPL tab, and block until it is closed. See `Gui.run_single_repl`, which this
 loads on first use. Opening a window needs a display. Arguments are checked before the GUI code is loaded,
 so invalid ones are reported without a display.
 """
-function run_single_repl(; tall_rows = nothing, kwargs...)
+function run_single_repl(; tall_rows = nothing, rank_count = nothing, kwargs...)
     tall = check_tall_rows(tall_rows)
-    return Base.invokelatest(gui_function(:run_single_repl); tall_rows = tall, kwargs...)
+    ranks = check_rank_count(rank_count)
+    return Base.invokelatest(gui_function(:run_single_repl); tall_rows = tall, rank_count = ranks, kwargs...)
 end
 
 # Environment variable that sets `tall_rows` for the single-REPL window.
@@ -70,24 +80,19 @@ end
 """
     main(args = ARGS) -> Int
 
-Run MPIEnsemble. With no arguments, open the single-REPL window and block
-until it is closed. The window's pseudo-terminal is sized to the pane unless
-the environment variable `MPIENSEMBLE_TALL_PTY_ROWS` is set to a positive
-integer, which gives it that many rows or the pane's rows if more; see
-`Gui.run_single_repl`. `args` may instead hold one positive integer, the number
-of MPI ranks; that path only prints the requested rank count and opens no
-window.
-Throws `ArgumentError` on invalid arguments or an invalid environment variable.
+Run MPIEnsemble, which opens the single-REPL window and blocks until it is closed. `args` may hold one
+positive integer, the number of MPI ranks. The window records it in its state; without it, the window
+asks for the number in a dialog, and Cancel closes the window without a count. No MPI ranks are launched.
+The window's pseudo-terminal is sized to the pane unless the environment variable
+`MPIENSEMBLE_TALL_PTY_ROWS` is set to a positive integer, which gives it that many rows or the pane's rows
+if more; see `Gui.run_single_repl`.
+Throws `ArgumentError` on invalid arguments or an invalid environment variable, before any window opens.
 Returns the process exit code, `0`.
 """
 function main(args = ARGS)
     nranks = parse_rank_count(args)
-    if nranks === nothing
-        tall_rows = tall_rows_from_env()
-        Base.invokelatest(gui_function(:run_single_repl); tall_rows)
-    else
-        println("MPIEnsemble: MPI with $nranks rank(s) (no window yet)")
-    end
+    tall_rows = tall_rows_from_env()
+    Base.invokelatest(gui_function(:run_single_repl); tall_rows, rank_count = nranks)
     return 0
 end
 

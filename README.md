@@ -11,8 +11,12 @@ This package is under development. The window so far shows Julia REPLs in tabs.
 julia --project -m MPIEnsemble [RANKS]
 ```
 
-With no argument, this opens the window and runs a Julia REPL in it. The window needs a display
-(on Linux, for example, an X server or Wayland session).
+The optional argument `RANKS` is the number of MPI ranks, a positive integer. The window records it. Without
+it, the window shows a dialog that asks for the number; OK records it, and Cancel closes the window, which then
+ends the program without error. Launching MPI ranks is not implemented yet, so for now the number is only
+recorded and no ranks are started.
+
+The window needs a display (on Linux, for example, an X server or Wayland session).
 
 The window has a tab bar across its top, with one tab for each REPL, titled "Julia 1", "Julia 2" and so on
 in the order they were opened. Clicking a tab shows its REPL, and the "+" button at the end of the bar opens

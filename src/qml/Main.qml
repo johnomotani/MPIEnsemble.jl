@@ -6,7 +6,8 @@ import jlqml
 // built by Julia, with the roles tabId, tabTitle, ended, rowModel and props. Only the pane of the
 // selected tab is visible, and only a visible pane takes input or is refilled. Julia.windowClosed() is
 // called when the window is closed; the Julia event loop in Gui.jl then returns. Julia asks for the
-// window to close by changing `closeRequest`, once its last tab has closed.
+// window to close by changing `closeRequest`, once its last tab has closed, or after the rank dialog is
+// cancelled. When Julia has no rank count (`windowProps.askRanks`), RankDialog opens at start-up.
 //
 // ApplicationWindow places the menu bar above the window contents, so the tab bar is anchored to the
 // top of the contents.
@@ -25,6 +26,16 @@ Controls.ApplicationWindow {
     onCloseRequestChanged: {
         if (closeRequest > 0)
             Qt.callLater(win.close)
+    }
+
+    // Asks for the rank count when Julia has none. The dialog reports its answer to Julia.
+    RankDialog {
+        id: rankDialog
+    }
+
+    Component.onCompleted: {
+        if (windowProps.askRanks)
+            rankDialog.open()
     }
 
     // Placeholder menus. Each holds one disabled item until its feature is implemented.

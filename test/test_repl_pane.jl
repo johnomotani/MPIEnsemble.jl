@@ -172,7 +172,7 @@ end
 const RP_GUI = Base.invokelatest(getfield, MPIEnsemble, :Gui)
 
 @testset "window: a new tab is shown and selected before its pane is sized" begin
-    win = RP_GUI.WindowState("", nothing)
+    win = RP_GUI.WindowState("", nothing, nothing)
     try
         RP_GUI.new_tab!(win)
         tab = only(win.tabs.tabs)
@@ -187,7 +187,7 @@ const RP_GUI = Base.invokelatest(getfield, MPIEnsemble, :Gui)
 end
 
 @testset "window: the startup input goes to the first tab only" begin
-    win = RP_GUI.WindowState("println(1)\r", nothing)
+    win = RP_GUI.WindowState("println(1)\r", nothing, nothing)
     try
         RP_GUI.new_tab!(win)
         RP_GUI.new_tab!(win)
@@ -201,7 +201,7 @@ end
 end
 
 @testset "window: a tab whose REPL fails to end is removed, the error propagates, and shutdown is not repeated" begin
-    win = RP_GUI.WindowState("", nothing)
+    win = RP_GUI.WindowState("", nothing, nothing)
     RP_GUI.new_tab!(win)
     RP_GUI.new_tab!(win)
     kept_id, failing_id = [t.id for t in win.tabs.tabs]
@@ -220,7 +220,7 @@ end
 end
 
 @testset "window: an event for a hidden pane is an error, except a scroll or size event" begin
-    win = RP_GUI.WindowState("", nothing)
+    win = RP_GUI.WindowState("", nothing, nothing)
     try
         RP_GUI.new_tab!(win)
         RP_GUI.new_tab!(win)

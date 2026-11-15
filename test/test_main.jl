@@ -1,11 +1,5 @@
 @testset "main" begin
-    out = mktemp() do path, io
-        redirect_stdout(io) do
-            @test MPIEnsemble.main(["3"]) == 0
-        end
-        flush(io)
-        read(path, String)
-    end
-    @test occursin("3 rank", out)
+    # Argument errors are reported before any window opens.
     @test_throws "positive integer" MPIEnsemble.main(["x"])
+    @test_throws "at most one argument" MPIEnsemble.main(["2", "3"])
 end

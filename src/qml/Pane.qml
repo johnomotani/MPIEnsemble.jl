@@ -16,7 +16,8 @@ import jlqml
 // gives it the focus, and its border is dim while it does not have the focus. A rank pane cannot be
 // restarted, so its end prompt has no Restart button and Return does nothing there. A rank pane has a
 // selection box, which Julia uses to choose the ranks that receive input. The box is checked with a cross
-// while its rank is the only one that receives input.
+// while its rank is the only one that receives input. A rank pane also has a zoom button, a magnifying
+// glass which Julia uses to show its rank alone; it is highlighted while its rank is zoomed.
 //
 // The pane holds keyboard focus. Each key press is passed to Julia, which writes the bytes for the
 // child process; the event is accepted only when Julia reports that it sent something. Ctrl+Shift+V
@@ -341,7 +342,7 @@ Rectangle {
             }
         }
     }
-    // The MPI rank of a rank pane, at the top-right of the output, left of the selection box. It takes no
+    // The MPI rank of a rank pane, at the top-right of the output, left of the zoom button. It takes no
     // mouse input, so presses and drags reach the output beneath it, and it is not part of the text selection.
     Rectangle {
         id: rankBadge
@@ -352,7 +353,7 @@ Rectangle {
         enabled: false
         anchors.top: parent.top
         anchors.topMargin: 6
-        anchors.right: selectButton.left
+        anchors.right: zoomButton.left
         anchors.rightMargin: 4
         width: Math.max(minWidth, badgeText.implicitWidth + 2 * padX)
         height: badgeText.implicitHeight + 2 * padY
@@ -366,6 +367,61 @@ Rectangle {
             color: "#a9b1d6"
             font.pixelSize: 13
         }
+    }
+
+    // The zoom button of a rank pane, between the rank badge and the selection box. It is a square the height
+    // of the rank badge, drawn as a magnifying glass: a ring and a handle. Clicking it shows the rank alone, or
+    // shows every rank again when it is zoomed (Julia.toggleZoom). A press gives the pane the focus, as the
+    // selection box does, so that the keyboard stays with the rank.
+    Rectangle {
+        id: zoomButton
+        readonly property real side: rankBadge.height
+        readonly property color ink: props.zoomed ? "#7aa2f7" : "#a9b1d6"
+        visible: rankPane
+        anchors.top: parent.top
+        anchors.topMargin: 6
+        anchors.right: selectButton.left
+        anchors.rightMargin: 4
+        width: side
+        height: side
+        radius: 3
+        color: zoomMouse.containsMouse ? "#3b4261" : "#cc1f2335"
+        border.color: ink
+        border.width: 1
+
+        // The ring of the lens, and its handle, which starts at the ring's lower right edge.
+        Rectangle {
+            x: zoomButton.side * 0.15
+            y: zoomButton.side * 0.15
+            width: zoomButton.side * 0.54
+            height: width
+            radius: width / 2
+            color: "transparent"
+            border.color: zoomButton.ink
+            border.width: 2
+        }
+
+        Rectangle {
+            x: zoomButton.side * 0.73 - width / 2
+            y: zoomButton.side * 0.73 - height / 2
+            width: zoomButton.side * 0.34
+            height: 2
+            rotation: 45
+            color: zoomButton.ink
+        }
+
+        MouseArea {
+            id: zoomMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton
+            onPressed: pane.forceActiveFocus()
+            onClicked: Julia.toggleZoom(pane.paneId)
+        }
+
+        Controls.ToolTip.visible: zoomMouse.containsMouse
+        Controls.ToolTip.delay: 500
+        Controls.ToolTip.text: props.zoomed ? "Show all ranks" : "Show only this rank"
     }
 
     // The selection box of a rank pane, at the top-right of the output, just left of the scrollbar. It is a

@@ -17,7 +17,9 @@ import jlqml
 //
 // The MPI tab has a Kill MPI button, which is enabled while the job can be killed. It opens KillDialog,
 // which asks for confirmation; Julia then kills the job, and the rank panes keep their output. Once the
-// job has ended, a Restart MPI button starts it again in the same panes.
+// job has ended, a Restart MPI button starts it again in the same panes. While a rank is zoomed
+// (`mpiProps.zoomed`), the grid has one column, so that the zoomed pane fills it, and the other rank
+// panes are hidden (`zoomHidden`).
 Controls.ApplicationWindow {
     id: win
     width: 960
@@ -349,7 +351,7 @@ Controls.ApplicationWindow {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 visible: mpiProps.panes
-                columns: mpiProps.columns
+                columns: mpiProps.zoomed ? 1 : mpiProps.columns
                 rowSpacing: 8
                 columnSpacing: 8
                 uniformCellWidths: true
@@ -366,7 +368,7 @@ Controls.ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         rankPane: true
-                        visible: mpiTab.visible
+                        visible: mpiTab.visible && !props.zoomHidden
                         onActiveFocusChanged: {
                             if (activeFocus)
                                 mpiTab.focusIndex = index

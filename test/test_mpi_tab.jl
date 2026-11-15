@@ -313,6 +313,208 @@ end
     end
 end
 
+@testset "MPI tab: selecting a rank sets the targets, and toggling clears the selection" begin
+    mpi = MT_GUI.MpiTab(3)
+    @test isempty(mpi.targets)
+    @test mpi.selected === nothing
+    MT_GUI.select_rank!(mpi, 2)
+    @test mpi.targets == Set([2])
+    @test mpi.selected == 2
+    # Selecting another rank moves the selection.
+    MT_GUI.select_rank!(mpi, 0)
+    @test mpi.targets == Set([0])
+    @test mpi.selected == 0
+    # Toggling the selected rank clears the selection, so every rank is a target; toggling another rank
+    # selects it alone.
+    MT_GUI.toggle_rank!(mpi, 0)
+    @test mpi.targets == Set(0:2)
+    @test mpi.selected === nothing
+    MT_GUI.toggle_rank!(mpi, 1)
+    @test mpi.targets == Set([1])
+    @test mpi.selected == 1
+    MT_GUI.toggle_rank!(mpi, 1)
+    @test mpi.targets == Set(0:2)
+    @test mpi.selected === nothing
+    # A rank that is not one of the job's ranks is an error, and leaves the targets as they were.
+    @test_throws "rank 3 is not one of the 3 ranks of this MPI tab" MT_GUI.select_rank!(mpi, 3)
+    @test_throws "rank -1 is not one of the 3 ranks of this MPI tab" MT_GUI.toggle_rank!(mpi, -1)
+    @test mpi.targets == Set(0:2)
+    @test mpi.selected === nothing
+end
+
+@testset "MPI tab: a Select button sends keys and pastes only to its rank" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            # The pane of rank 2 is the third in rank order.
+            @test [v.rank for v in mpi.views] == [0, 1, 2]
+            two = mpi.views[3]
+            @test mpi.selected === nothing
+            @test [v.props["selected"] for v in mpi.views] == [false, false, false]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, false, false]
+
+            MT_GUI.toggle_rank_pane!(win, two)
+            @test mpi.selected == 2
+            @test mpi.targets == Set([2])
+            @test [v.props["selected"] for v in mpi.views] == [false, false, true]
+            @test [v.props["dimmed"] for v in mpi.views] == [true, true, false]
+
+            # A key from rank 0's pane, which is not a target, is not sent by that pane, and reaches rank 2 only.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "only-two", 0) === false
+            @test MT_GUI.key_input!(win, two, 0, "two-key", 0) === true
+            mt_run_until(() -> occursin("only-two", mt_text(two)) && occursin("two-key", mt_text(two)), win)
+            # A paste from rank 1's pane reaches rank 2 only.
+            @test MT_GUI.paste_input!(win, mpi.views[2], "two-paste") === false
+            mt_run_until(() -> occursin("two-paste", mt_text(two)), win)
+            for other in mpi.views[1:2]
+                @test !occursin("only-two", mt_text(other))
+                @test !occursin("two-key", mt_text(other))
+                @test !occursin("two-paste", mt_text(other))
+            end
+
+            # Toggling the selected rank again sends input to every rank, and clears the dimming.
+            MT_GUI.toggle_rank_pane!(win, two)
+            @test mpi.targets == Set(0:2)
+            @test [v.props["selected"] for v in mpi.views] == [false, false, false]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, false, false]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "all-again", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "all-again"), win)
+
+            # A Select button on another pane moves the selection to that pane.
+            MT_GUI.toggle_rank_pane!(win, mpi.views[1])
+            @test mpi.targets == Set([0])
+            @test [v.props["selected"] for v in mpi.views] == [true, false, false]
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: the selected rank survives a restart" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            MT_GUI.toggle_rank_pane!(win, mpi.views[3])
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            @test mpi.targets == Set([2])
+            @test [v.props["selected"] for v in mpi.views] == [false, false, true]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "after-restart", 0) === false
+            mt_run_until(() -> occursin("after-restart", mt_text(mpi.views[3])), win)
+            @test !occursin("after-restart", mt_text(mpi.views[1]))
+            @test !occursin("after-restart", mt_text(mpi.views[2]))
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a one-rank job starts unselected, and its Select button toggles the selection" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 1; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            view = only(mpi.views)
+
+            # The only rank is the only target, but no rank is selected, so nothing is shown as selected or dimmed.
+            @test mpi.targets == Set([0])
+            @test mpi.selected === nothing
+            @test view.props["selected"] == false
+            @test view.props["dimmed"] == false
+
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test mpi.selected == 0
+            @test mpi.targets == Set([0])
+            @test view.props["selected"] == true
+            @test view.props["dimmed"] == false
+
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test mpi.selected === nothing
+            @test mpi.targets == Set([0])
+            @test view.props["selected"] == false
+            @test view.props["dimmed"] == false
+
+            # Input reaches the rank whether or not it is selected.
+            @test MT_GUI.key_input!(win, view, 0, "one-rank", 0) === true
+            mt_run_until(() -> occursin("one-rank", mt_text(view)), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a one-rank selection survives a restart" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 1; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            view = only(mpi.views)
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            @test mpi.selected == 0
+            @test mpi.targets == Set([0])
+            @test view.props["selected"] == true
+            @test view.props["dimmed"] == false
+
+            # Toggling after the restart clears the selection, as before it.
+            MT_GUI.toggle_rank_pane!(win, view)
+            @test mpi.selected === nothing
+            @test view.props["selected"] == false
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a Select button on a REPL tab's pane is an error" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            # No MPI tab is opened here, so the REPL tab is the window's only tab.
+            MT_GUI.new_tab!(win)
+            repl = win.tabs.tabs[1].state
+            @test MT_GUI.mpi_tab_of(win, repl) === nothing
+            @test_throws "is not a rank pane of an MPI tab" MT_GUI.toggle_rank_pane!(win, repl)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
 @testset "REPL tab: key presses and pastes reach only its own pane" begin
     mt_with() do
         win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
@@ -1188,6 +1390,229 @@ end
             @test !failed.killed
             @test MT_GUI.send_bytes!(failed, Vector{UInt8}(codeunits("rank-zero"))) === true
             mt_run_until(() -> occursin("rank-zero", mt_text(failed)), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a zoomed rank alone is shown and receives input, and the other panes keep their output" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            one = mpi.views[2]
+            MT_GUI.toggle_zoom_pane!(win, one)
+            @test mpi.zoomed == 1
+            @test win.mpi_props["zoomed"] == true
+            @test mpi.targets == Set(0:2)
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [1]
+            @test [v.session.visible for v in mpi.views] == [false, true, false]
+            @test [v.props["zoomHidden"] for v in mpi.views] == [true, false, true]
+            @test [v.props["zoomed"] for v in mpi.views] == [false, true, false]
+            @test [v.props["dimmed"] for v in mpi.views] == [true, false, true]
+
+            # The zoomed pane is resized to its new size, and the hidden panes keep their size.
+            MT_GUI.pane_sized!(one, 800, 600, 8, 16)
+            mt_run_until(() -> occursin("resize 37 100", mt_text(one)), win)
+            @test !any(occursin("resize 37 100", mt_text(v)) for v in mpi.views if v !== one)
+
+            # Keys and pastes reach only the zoomed rank.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "from-zero", 0) === false
+            @test MT_GUI.key_input!(win, one, 0, "zoom-key", 0) === true
+            @test MT_GUI.paste_input!(win, one, "zoom-paste") === true
+            mt_run_until(() -> occursin("zoom-key", mt_text(one)) && occursin("zoom-paste", mt_text(one)), win)
+            @test !occursin("zoom-key", mt_text(mpi.views[1]))
+            @test !occursin("zoom-paste", mt_text(mpi.views[3]))
+
+            # A hidden pane still takes output: its rank echoes what it receives, and the echo is buffered.
+            hidden = mpi.views[1]
+            @test MT_GUI.send_bytes!(hidden, Vector{UInt8}(codeunits("hidden-marker"))) === true
+            mt_run_until(() -> occursin("hidden-marker", mt_text(hidden)), win)
+            @test !occursin("hidden-marker", mt_text(one))
+
+            # An event for a hidden pane is an error, except a size or scroll event.
+            @test MT_GUI.pane_call(v -> v.id, win, hidden.id, :none; hidden_ok = true) == :none
+            @test MT_GUI.pane_call(_ -> "ran", win, hidden.id, false) === false
+            @test_throws "whose pane is hidden" MT_GUI.check_failure!(win)
+            win.failure = nothing
+
+            # A second zoom on the zoomed pane restores the grid and the routing to every rank.
+            MT_GUI.toggle_zoom_pane!(win, one)
+            @test mpi.zoomed === nothing
+            @test win.mpi_props["zoomed"] == false
+            @test all(v.session.visible for v in mpi.views)
+            @test [v.props["zoomHidden"] for v in mpi.views] == [false, false, false]
+            @test [v.props["zoomed"] for v in mpi.views] == [false, false, false]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, false, false]
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0, 1, 2]
+            # Output that arrived while rank 0 was hidden is shown again, with the rest of the grid.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "grid-again", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "grid-again") && occursin("hidden-marker", mt_text(hidden)), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a zoom keeps the selection, which takes effect again when the zoom ends" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            MT_GUI.toggle_rank_pane!(win, mpi.views[3])
+            @test mpi.targets == Set([2])
+            MT_GUI.toggle_zoom_pane!(win, mpi.views[1])
+            @test mpi.selected == 2
+            @test mpi.targets == Set([2])
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0]
+            @test [v.props["selected"] for v in mpi.views] == [false, false, true]
+
+            # The Select button of the zoomed rank still changes the selection, which applies after the zoom.
+            MT_GUI.toggle_rank_pane!(win, mpi.views[1])
+            @test mpi.selected == 0
+            @test mpi.targets == Set([0])
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, true, true]
+            MT_GUI.toggle_zoom_pane!(win, mpi.views[1])
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0]
+            @test [v.props["dimmed"] for v in mpi.views] == [false, true, true]
+            @test [v.props["selected"] for v in mpi.views] == [true, false, false]
+
+            # Selecting rank 2 and zooming it, then unzooming, leaves rank 2 as the only target.
+            MT_GUI.toggle_rank_pane!(win, mpi.views[3])
+            MT_GUI.toggle_zoom_pane!(win, mpi.views[3])
+            @test mpi.zoomed == 2
+            MT_GUI.toggle_zoom_pane!(win, mpi.views[3])
+            @test mpi.zoomed === nothing
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [2]
+            @test [v.props["dimmed"] for v in mpi.views] == [true, true, false]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "selected-two", 0) === false
+            @test MT_GUI.key_input!(win, mpi.views[3], 0, "selected-two", 0) === true
+            mt_run_until(() -> occursin("selected-two", mt_text(mpi.views[3])), win)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a zoom survives a tab switch, a kill and a restart" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.new_tab!(win)
+            repl_tab = win.tabs.tabs[1]
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            MT_GUI.toggle_zoom_pane!(win, mpi.views[3])
+
+            # Switching to the REPL tab hides every rank pane, and switching back shows the zoomed one alone.
+            MT_GUI.select_tab!(win, repl_tab.id)
+            @test [v.session.visible for v in mpi.views] == [false, false, false]
+            MT_GUI.select_tab!(win, tab.id)
+            @test [v.session.visible for v in mpi.views] == [false, false, true]
+            @test mpi.zoomed == 2
+
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test mpi.zoomed == 2
+            @test [v.session.visible for v in mpi.views] == [false, false, true]
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            @test mpi.zoomed == 2
+            @test win.mpi_props["zoomed"] == true
+            @test [v.session.visible for v in mpi.views] == [false, false, true]
+            @test [v.props["zoomHidden"] for v in mpi.views] == [true, true, false]
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [2]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "after-restart", 0) === false
+            @test MT_GUI.key_input!(win, mpi.views[3], 0, "after-restart", 0) === true
+            mt_run_until(() -> occursin("after-restart", mt_text(mpi.views[3])), win)
+            @test !occursin("after-restart", mt_text(mpi.views[1]))
+            @test win.failure === nothing
+
+            MT_GUI.toggle_zoom_pane!(win, mpi.views[3])
+            @test all(v.session.visible for v in mpi.views)
+            @test win.mpi_props["zoomed"] == false
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: zooming a rank that is not in the job, or a REPL tab's pane, is an error" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.new_tab!(win)
+            repl_tab = win.tabs.tabs[1]
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            # Before the job has started there are no panes to zoom.
+            @test_throws "rank 0 has no pane in this MPI tab" MT_GUI.zoom_rank!(mpi, 0)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            @test_throws "rank 2 is not one of the 2 ranks of this MPI tab" MT_GUI.zoom_rank!(mpi, 2)
+            @test_throws "rank -1 is not one of the 2 ranks of this MPI tab" MT_GUI.toggle_zoom!(mpi, -1)
+            @test_throws "is not a rank pane of an MPI tab, so it cannot be zoomed" begin
+                MT_GUI.toggle_zoom_pane!(win, repl_tab.state)
+            end
+            @test mpi.zoomed === nothing
+            @test win.mpi_props["zoomed"] == false
+            @test all(v.session.visible for v in mpi.views)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+    @test mt_fake_processes_gone()
+end
+
+@testset "MPI tab: a one-rank job can be zoomed and unzoomed" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 1; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win)
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            view = only(mpi.views)
+
+            MT_GUI.toggle_zoom_pane!(win, view)
+            @test mpi.zoomed == 0
+            @test view.session.visible
+            @test view.props["zoomed"] == true
+            @test view.props["zoomHidden"] == false
+            @test view.props["dimmed"] == false
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0]
+            @test MT_GUI.key_input!(win, view, 0, "one-zoomed", 0) === true
+            mt_run_until(() -> occursin("one-zoomed", mt_text(view)), win)
+
+            MT_GUI.toggle_zoom_pane!(win, view)
+            @test mpi.zoomed === nothing
+            @test view.props["zoomed"] == false
+            @test view.session.visible
             @test win.failure === nothing
         finally
             MT_GUI.shutdown!(win)

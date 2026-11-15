@@ -79,8 +79,12 @@ the job, or the error that stopped the launch, or `nothing` while the launch is 
 turns the result into panes and state (see `finish_launch!`), so the task itself never touches the window.
 `offset` is where the fair drain of the rank panes starts next time (see `TabSet.drain_fairly!`).
 `targets` is the set of ranks that receive input from the focused pane, and it holds every rank once the job
-has started (see `attach_job!`). `zoomed` is the rank that alone receives input, or `nothing`. Both are
-read by `route_targets`.
+has started (see `attach_job!`). `zoomed` is the rank that alone receives input and is shown, or `nothing`.
+Both are read by `route_targets`, and the other rank panes are hidden while a rank is zoomed (see
+`show_selection!`). `selected` is the rank that the user has selected with its Select button, or `nothing`
+when no rank has been selected. `select_rank!` and `toggle_rank!` change `selected`, and `targets` with it: while
+`selected` is a rank, `targets` is that rank alone. The two are kept apart because a job with one rank
+has that rank as its only target without any selection.
 """
 mutable struct MpiTab
     const nranks::Int
@@ -92,10 +96,12 @@ mutable struct MpiTab
     result::Any
     offset::Int
     targets::Set{Int}
+    selected::Union{Nothing, Int}
     zoomed::Union{Nothing, Int}
 end
 
-MpiTab(nranks::Int) = MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0, Set{Int}(), nothing)
+MpiTab(nranks::Int) =
+    MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0, Set{Int}(), nothing, nothing)
 
 # State of the window. `views` maps the pane ids of the open panes to their views, and `closed_panes`
 # holds the ids of the panes that were closed. `tab_rows` is the tab bar's model. `repl_panes` and
@@ -143,6 +149,7 @@ function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, In
     mpi_props["killable"] = false
     mpi_props["panes"] = false
     mpi_props["messageFailed"] = false
+    mpi_props["zoomed"] = false
     rows = QML.JuliaItemModel(TabSet.Tab[], false)
     QML.addrole!(rows, "tabId", t -> t.id)
     QML.addrole!(rows, "tabTitle", t -> TabSet.tab_label(t, tab_ended(t)))
@@ -186,6 +193,10 @@ function new_view(win::WindowState, start::Function; rank::Union{Nothing, Int} =
     props["ended"] = false
     props["exitText"] = ""
     props["rankLabel"] = rank === nothing ? "" : string(rank)
+    props["selected"] = false
+    props["dimmed"] = false
+    props["zoomed"] = false
+    props["zoomHidden"] = false
     owner = Ref{Any}(nothing)
     session = start(() -> publish_rows!(owner[]))
     model = QML.JuliaItemModel(session.pane.rows, false)
@@ -317,6 +328,11 @@ Each pane keeps its output, and the new session's output follows it.
 An error from a tab's reader or writer task, or from a QML call, is rethrown by this function once the
 window has closed. The error of a rank's connection is shown in that rank's pane and printed to standard
 error instead, and the other panes keep working.
+
+Each rank pane has a Zoom button. Zooming a rank makes its pane fill the MPI tab and hides the other rank panes,
+which keep receiving and buffering their output. While the rank is zoomed, keys and pastes go only to it. The
+selection is kept, and takes effect again when the zoom ends, by a second click on the Zoom button. The zoom
+survives a Kill MPI, a restart, and a change of tab.
 """
 function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing, rank_count = nothing)
     tall = check_tall_rows(tall_rows)
@@ -377,6 +393,8 @@ function register_functions!(win::WindowState)
     QML.qmlfunction("restartSession", id -> pane_call(restart_session!, win, id, nothing))
     QML.qmlfunction("killMpi", id -> tab_call(tab_id -> kill_mpi!(win, tab_id), win, id, nothing))
     QML.qmlfunction("restartMpi", id -> tab_call(tab_id -> restart_mpi!(win, tab_id), win, id, nothing))
+    QML.qmlfunction("toggleRank", id -> pane_call(view -> toggle_rank_pane!(win, view), win, id, nothing))
+    QML.qmlfunction("toggleZoom", id -> pane_call(view -> toggle_zoom_pane!(win, view), win, id, nothing))
     return nothing
 end
 
@@ -525,14 +543,25 @@ function selected_tab(win::WindowState)
 end
 
 # Make the panes of the selected tab visible and those of every other tab hidden, and tell QML which tab
-# is selected. A pane's visibility is set before the properties that QML binds to it change, so that a
-# pane which QML creates or shows finds itself visible.
+# is selected. While a rank of an MPI tab is zoomed, its other rank panes are hidden as well. Each rank pane
+# has the props `zoomed` and `zoomHidden`, which QML reads for its zoom button and its visibility: they are
+# set here, for every pane, so that a pane which is hidden by the zoom is hidden in QML too. A pane's
+# visibility is set before the properties that QML binds to it change, so that a pane which QML creates or
+# shows finds itself visible.
 function show_selection!(win::WindowState)
     current = TabSet.selected_id(win.tabs)
     for tab in win.tabs.tabs
         shown = tab.id == current
+        mpi = tab.kind === :mpi ? tab.state : nothing
+        mpi === nothing || (win.mpi_props["zoomed"] = mpi.zoomed !== nothing)
         for view in tab_views(tab)
-            ReplPane.set_visible!(view.session, shown)
+            zoom_hidden = mpi !== nothing && zoom_hides(mpi, view)
+            ReplPane.set_visible!(view.session, shown && !zoom_hidden)
+            zoom_hidden == view.props["zoomHidden"] || (view.props["zoomHidden"] = zoom_hidden)
+            if mpi !== nothing
+                is_zoomed = view.rank == mpi.zoomed
+                is_zoomed == view.props["zoomed"] || (view.props["zoomed"] = is_zoomed)
+            end
             sync_props!(view)
         end
     end
@@ -644,7 +673,7 @@ end
 # repeats, so that each pane is visible when QML creates it. Pane `i` shows the connection of rank `i - 1`,
 # which the rank labels rely on: the rank comes from each connection's HELLO frame.
 #
-# A restart keeps the panes, their logs and their targets, and gives each pane the connection of the new
+# A restart keeps the panes, their logs, and the targets and selection, and gives each pane the connection of the new
 # job's rank with the same number. Each pane's output from the old job stays, and the new session follows it.
 function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
     for (i, conn) in enumerate(job.ranks)
@@ -670,6 +699,7 @@ function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
             sync_props!(view)
         end
     end
+    sync_selection_props!(mpi)
     set_mpi_status!(win, mpi, :running, "")
     show_selection!(win)
     if fresh
@@ -887,6 +917,85 @@ function route_targets(mpi::MpiTab)
     views = [v for v in mpi.views if v.rank in mpi.targets]
     length(views) == length(mpi.targets) || error("a target rank of this MPI tab has no pane")
     return views
+end
+
+# Select `rank`, which makes it the only target, so that input goes only to its pane. Throws if `rank` is not a
+# rank of the job.
+function select_rank!(mpi::MpiTab, rank::Integer)
+    0 <= rank < mpi.nranks || error("rank $rank is not one of the $(mpi.nranks) ranks of this MPI tab")
+    mpi.selected = Int(rank)
+    mpi.targets = Set([Int(rank)])
+    return nothing
+end
+
+# Clear the selection if `rank` is selected, else select it. Clearing makes every rank a target again, so input
+# goes to all ranks. Selecting one rank while another is selected moves the selection to that rank.
+function toggle_rank!(mpi::MpiTab, rank::Integer)
+    if mpi.selected == Int(rank)
+        mpi.selected = nothing
+        mpi.targets = Set(0:(mpi.nranks - 1))
+    else
+        select_rank!(mpi, rank)
+    end
+    return nothing
+end
+
+# Zoom the rank `rank` of an MPI tab, so that it alone receives input and is shown. Throws if `rank` is not a
+# rank of the job, or has no pane in the tab yet.
+function zoom_rank!(mpi::MpiTab, rank::Integer)
+    0 <= rank < mpi.nranks || error("rank $rank is not one of the $(mpi.nranks) ranks of this MPI tab")
+    any(v -> v.rank == Int(rank), mpi.views) || error("rank $rank has no pane in this MPI tab")
+    mpi.zoomed = Int(rank)
+    return nothing
+end
+
+# Unzoom `rank` if it is zoomed, else zoom it. Zooming another rank while one is zoomed moves the zoom to it.
+function toggle_zoom!(mpi::MpiTab, rank::Integer)
+    if mpi.zoomed == Int(rank)
+        mpi.zoomed = nothing
+    else
+        zoom_rank!(mpi, rank)
+    end
+    return nothing
+end
+
+# Whether the rank pane `view` is hidden because another rank of its MPI tab is zoomed.
+zoom_hides(mpi::MpiTab, view::TabView) = mpi.zoomed !== nothing && view.rank != mpi.zoomed
+
+# Toggle the zoom from the Zoom button of the rank pane `view`. The selection is not changed: while a rank is
+# zoomed, a Select button still changes the selection, which takes effect when the zoom ends. Throws if `view`
+# is not a rank pane of an MPI tab.
+function toggle_zoom_pane!(win::WindowState, view::TabView)
+    mpi = mpi_tab_of(win, view)
+    mpi === nothing && error("pane $(view.id) is not a rank pane of an MPI tab, so it cannot be zoomed")
+    toggle_zoom!(mpi, view.rank)
+    show_selection!(win)
+    sync_selection_props!(mpi)
+    return nothing
+end
+
+# Toggle the selection from the Select button of the rank pane `view`. Throws if `view` is not a rank pane
+# of an MPI tab.
+function toggle_rank_pane!(win::WindowState, view::TabView)
+    mpi = mpi_tab_of(win, view)
+    mpi === nothing && error("pane $(view.id) is not a rank pane of an MPI tab, so it has no rank to select")
+    toggle_rank!(mpi, view.rank)
+    sync_selection_props!(mpi)
+    return nothing
+end
+
+# Set the properties that QML reads for the selection. `selected` is true for the pane of the rank in
+# `mpi.selected`, which shows its Select button as selected. `dimmed` is true for a pane that does not receive
+# input from the focused pane (see `route_targets`).
+function sync_selection_props!(mpi::MpiTab)
+    receivers = Set(v.rank for v in route_targets(mpi))
+    for view in mpi.views
+        selected = view.rank == mpi.selected
+        selected == view.props["selected"] || (view.props["selected"] = selected)
+        dimmed = !(view.rank in receivers)
+        dimmed == view.props["dimmed"] || (view.props["dimmed"] = dimmed)
+    end
+    return nothing
 end
 
 # Deliver input from the focused pane `view`, by calling `send(target)` for each pane that receives it.

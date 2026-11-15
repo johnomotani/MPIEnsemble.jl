@@ -5,6 +5,7 @@ module Pty
 const O_RDWR = 0x0002
 const O_NOCTTY = 0x0100
 const O_NONBLOCK = 0x0800
+const O_CLOEXEC = 0o2000000
 const F_GETFL = 3
 const F_SETFL = 4
 const TIOCSWINSZ = 0x5414
@@ -55,7 +56,7 @@ end
 
 # The master is non-blocking, so that `read_output!` returns at once when no output is ready.
 function open_master()
-    fd = ccall(:posix_openpt, Cint, (Cint,), O_RDWR | O_NOCTTY)
+    fd = ccall(:posix_openpt, Cint, (Cint,), O_RDWR | O_NOCTTY | O_CLOEXEC)
     @check_libc fd "posix_openpt"
     flags = ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, F_GETFL, 0)
     @check_libc flags "fcntl(F_GETFL)"
@@ -71,7 +72,7 @@ function open_slave(masterfd::Cint)
     namep = ccall(:ptsname, Ptr{UInt8}, (Cint,), masterfd)
     namep == C_NULL && throw(SystemError("ptsname", Libc.errno()))
     name = unsafe_string(namep)
-    fd = ccall(:open, Cint, (Cstring, Cint), name, O_RDWR | O_NOCTTY)
+    fd = ccall(:open, Cint, (Cstring, Cint), name, O_RDWR | O_NOCTTY | O_CLOEXEC)
     @check_libc fd "open($name)"
     return fd
 end
@@ -141,9 +142,10 @@ function spawn(cmd::Cmd; rows::Integer = 24, cols::Integer = 80)
         slavefd = open_slave(masterfd)
         set_winsize!(slavefd, rows, cols)
         master = Base.TTY(RawFD(masterfd))
-        # Closing the master does not signal the child (it only gets EIO on its terminal), so a child
-        # whose parent dies would otherwise survive. The parent-death signal is set by `setpriv`,
-        # which then execs `cmd`: `setsid` and `setpriv` both exec, so no extra process remains.
+        # The parent-death signal is set by `setpriv`, which then execs `cmd`: `setsid` and `setpriv`
+        # both exec, so no extra process remains. The master and slave descriptors are close-on-exec,
+        # so when the parent dies and the kernel closes the master, the child's terminal hangs up and
+        # the session leader gets SIGHUP.
         wrapped = Cmd(Cmd(["setsid", "-c", "setpriv", "--pdeathsig", "KILL", cmd.exec...]); env = cmd.env, dir = cmd.dir)
         proc = run(wrapped, RawFD(slavefd), RawFD(slavefd), RawFD(slavefd); wait = false)
         wait_for_exec(proc)
@@ -236,7 +238,8 @@ end
 
 End the session. If the child is still running, send Ctrl+D and wait up to
 `timeout` seconds for it to exit, then send SIGKILL. The master is closed
-in all cases. Closing the master alone does not stop the child.
+in all cases. Closing the master hangs up the child's terminal, which sends
+SIGHUP to the child; a child that ignores SIGHUP keeps running.
 """
 function Base.close(s::Session; timeout::Real = 5)
     isopen(s) || return nothing

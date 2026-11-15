@@ -30,6 +30,9 @@ const WRAPPER_SCRIPT = joinpath(@__DIR__, "wrapper", "wrapper.py")
 const RANK_TERM = "xterm-256color"
 const RANK_FRAME_BUFFER = 256
 
+# The JLL binaries of MPIPreferences that provide mpiexec on Linux. MicrosoftMPI_jll is Windows only.
+const JLL_BINARIES = ("MPICH_jll", "OpenMPI_jll", "MPItrampoline_jll", "MPIABI_jll")
+
 # errno values on Linux.
 const ESRCH = 3
 
@@ -167,15 +170,14 @@ end
 
 The MPI launcher for `binary`, which is the value of `MPIPreferences.binary`.
 
-For `"system"`, the launcher is the `mpiexec` preference. For a JLL binary, which is a package name ending in
-`_jll`, the launcher is the `mpiexec()` of that package. The package must already be loadable from the
-active project (or its dependencies), and is not installed here; an error says so if it is not found.
-Any other value throws an error.
+For `"system"`, the launcher is the `mpiexec` preference. For a JLL binary, the launcher is the `mpiexec()` of
+that JLL, which is one of `JLL_BINARIES`. The JLL is a dependency of this package, so it is loaded from the
+package's own manifest, whatever the active project is. Any other value throws an error.
 """
 function mpiexec_command(binary::AbstractString = MPIPreferences.binary)
     binary == "system" && return system_mpiexec()
-    endswith(binary, "_jll") ||
-        error("MPIPreferences.binary is \"$binary\", which is neither \"system\" nor a JLL package name")
+    binary in JLL_BINARIES || error("MPIPreferences.binary is \"$binary\", which is neither \"system\" nor " *
+        "a JLL binary supported on Linux (" * join(JLL_BINARIES, ", ") * ")")
     return jll_mpiexec(binary)
 end
 
@@ -186,17 +188,19 @@ function system_mpiexec()
     return mpiexec_from_preference(getfield(system, :mpiexec_path))
 end
 
+# Load the named JLL, which is a dependency of MPIEnsemble, and return its mpiexec().
 function jll_mpiexec(name::AbstractString)
-    pkgid = Base.identify_package(name)
-    pkgid === nothing && error("MPIPreferences.binary is \"$name\", but $name is not a dependency of the " *
-        "active project, so its mpiexec cannot be found. Add $name to the project, or choose another binary " *
-        "with MPIPreferences.")
+    pkgid = Base.identify_package(parentmodule(@__MODULE__), name)
+    pkgid === nothing && error("$name is not in the manifest of MPIEnsemble, so its mpiexec cannot be found; " *
+        "resolve the package environment that loads MPIEnsemble")
     jll = try
         Base.require(pkgid)
     catch e
         error("cannot load $name for its mpiexec: " * sprint(showerror, e))
     end
-    isdefined(jll, :mpiexec) || error("$name does not define mpiexec")
+    isdefined(jll, :mpiexec) || error("$name does not provide mpiexec for MPIPreferences.binary = " *
+        "\"$(MPIPreferences.binary)\"; a JLL provides its MPI only when MPIPreferences.binary names it, so set " *
+        "MPIPreferences.binary to \"$name\" to use it")
     cmd = Base.invokelatest(getfield(jll, :mpiexec))
     cmd isa Cmd || error("$name.mpiexec() returned a $(typeof(cmd)), not a Cmd")
     return cmd

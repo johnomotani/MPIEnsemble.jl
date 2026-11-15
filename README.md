@@ -78,6 +78,15 @@ effect is that the REPL's `displaysize` reports the tall row count instead of th
 output is not truncated to the pane height, and programs that use the terminal height see the tall
 count. An invalid value, such as `0` or `abc`, is an error when the window is opened.
 
+## MPI builds
+
+The package installs the MPI builds MPICH_jll, OpenMPI_jll, MPItrampoline_jll and MPIABI_jll, which are
+the MPI binaries that the launcher can use on Linux. MPIPreferences.jl chooses which one is used, and the
+default is MPICH_jll. Each of these packages provides its MPI only when it is the one MPIPreferences.jl
+selects. To use another, run `MPIPreferences.use_jll_binary("OpenMPI_jll")` (or the name of another build)
+and restart Julia. To use an MPI installed on the system, run `MPIPreferences.use_system_binary()` and restart
+Julia; its launcher is `mpiexec` on the PATH unless another command is given with the `mpiexec` keyword.
+
 ## Wrapper
 
 `src/wrapper/wrapper.py` is the per-rank process that runs one Julia REPL in a pseudo-terminal and

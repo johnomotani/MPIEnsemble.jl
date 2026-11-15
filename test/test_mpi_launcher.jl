@@ -3,9 +3,11 @@
 # wrapper with a julia REPL per rank. Those run wherever sh, setsid and python3 (3.11 or later) exist.
 # The testset "real MPI launcher" needs an mpiexec on PATH and is not run otherwise.
 
+using Artifacts: artifact_exists, artifact_hash
+using TOML
 using MPIEnsemble.MpiLauncher
 using MPIEnsemble.MpiLauncher: MAX_PAYLOAD, T_DATA, T_RESIZE, T_SIGNAL, T_HELLO, T_EXIT, resize_payload,
-    parse_hello, mpiexec_from_preference
+    parse_hello, mpiexec_from_preference, JLL_BINARIES, MPIPreferences
 
 const FAKE_LAUNCHER = Cmd(["sh", joinpath(@__DIR__, "mpi", "fake_mpiexec.sh")])
 const FAKE_WRAPPER = joinpath(@__DIR__, "mpi", "fake_wrapper.py")
@@ -116,8 +118,139 @@ end
     @test_throws "mpiexec preference is not set" mpiexec_from_preference(nothing)
     @test_throws "empty list" mpiexec_from_preference(String[])
     @test_throws "neither \"system\" nor a JLL" mpiexec_command("OpenMPI")
-    # A JLL that is not a dependency of the active project is an error, not a guessed path.
-    @test_throws "is not a dependency of the active project" mpiexec_command("NoSuchMPI_jll")
+    # Binaries that are not provided on Linux are an error, not a guessed path.
+    @test_throws "neither \"system\" nor a JLL binary supported on Linux" mpiexec_command("MicrosoftMPI_jll")
+    @test_throws "neither \"system\" nor a JLL binary supported on Linux" mpiexec_command("NoSuchMPI_jll")
+end
+
+# The JLL that provides each binary name, and the MPI tag that the JLL's artefacts carry in Artifacts.toml.
+const MPI_TAGS = Dict("MPICH_jll" => "mpich", "OpenMPI_jll" => "openmpi", "MPItrampoline_jll" => "mpitrampoline",
+    "MPIABI_jll" => "mpiabi")
+
+# Whether the artefact of `name` for x86_64 Linux (glibc, libgfortran 5) with MPI tag `tag` is installed. The
+# artefact is not downloaded: only its directory is checked, so the JLL is not loaded.
+function jll_artefact_installed(name::AbstractString, tag::AbstractString)
+    pkgid = Base.identify_package(MPIEnsemble, name)
+    pkgid === nothing && return false
+    artifacts_toml = joinpath(dirname(dirname(Base.locate_package(pkgid))), "Artifacts.toml")
+    isfile(artifacts_toml) || return false
+    platform = Base.BinaryPlatforms.Platform("x86_64", "linux"; libc = "glibc", libgfortran_version = v"5",
+        mpi = tag)
+    for artefact in keys(TOML.parsefile(artifacts_toml))
+        hash = artifact_hash(artefact, artifacts_toml; platform)
+        hash !== nothing && artifact_exists(hash) && return true
+    end
+    return false
+end
+
+# A temporary project with MPIEnsemble as a path dependency, resolved from the local registry. Its
+# LocalPreferences.toml sets MPIPreferences.binary when `binary` is given. Preferences are only read for the
+# direct dependencies of the active project, so MPIPreferences is listed as one when it is set.
+# Returns the project's directory.
+function temporary_project(binary::Union{Nothing, AbstractString})
+    dir = mktempdir()
+    write(joinpath(dir, "Project.toml"), """
+        [deps]
+        MPIEnsemble = "842cab18-bf0f-4590-b351-c56cac5de6ce"
+        $(binary === nothing ? "" : "MPIPreferences = \"3da0fdf6-3ccc-4f1b-acd9-58baa6c99267\"")
+
+        [sources]
+        MPIEnsemble = {path = "$(pkgdir(MPIEnsemble))"}
+        """)
+    if binary !== nothing
+        write(joinpath(dir, "LocalPreferences.toml"), """
+            [MPIPreferences]
+            _format = "1.0"
+            binary = "$binary"
+            """)
+    end
+    # Pkg.test sets JULIA_LOAD_PATH, which leaves out the standard libraries, so the subprocess unsets it.
+    withenv("JULIA_LOAD_PATH" => nothing) do
+        run(pipeline(`$(Base.julia_cmd()) --project=$dir --startup-file=no -e 'using Pkg; Pkg.resolve()'`,
+            stdout = devnull))
+    end
+    return dir
+end
+
+# Runs `mpiexec --version` through mpiexec_command() in a fresh julia process with the project `dir`, and
+# returns the process's output. The process also reports whether the project itself depends on the binary's
+# JLL, which must be false for the launcher to come from the package's own dependencies.
+function mpiexec_in_project(dir::AbstractString)
+    script = """
+        using MPIEnsemble.MpiLauncher
+        using MPIEnsemble.MpiLauncher: MPIPreferences
+        cmd = mpiexec_command()
+        println("binary=", MPIPreferences.binary)
+        println("active_project_has_jll=", Base.identify_package(MPIPreferences.binary) !== nothing)
+        print(read(`\$cmd --version`, String))
+        """
+    # Pkg.test sets JULIA_LOAD_PATH, which leaves out the standard libraries, so the subprocess unsets it.
+    return withenv("JULIA_LOAD_PATH" => nothing) do
+        read(`$(Base.julia_cmd()) --project=$dir --startup-file=no -e $script`, String)
+    end
+end
+
+@testset "MpiLauncher finds the mpiexec of the JLL binaries" begin
+    # MPIPreferences defaults to MPICH_jll on Linux. The in-process check uses whatever binary the test
+    # process has, and is skipped unless the artefact is installed.
+    @testset "default preferences, in this process" begin
+        binary = MPIPreferences.binary
+        if !(binary in JLL_BINARIES)
+            @info "not testing the default mpiexec in this process: MPIPreferences.binary is \"$binary\""
+        elseif !jll_artefact_installed(binary, MPI_TAGS[binary])
+            @info "not testing the default mpiexec in this process: the artefact of $binary is not installed"
+        else
+            cmd = mpiexec_command()
+            @test cmd isa Cmd
+            @test isfile(first(cmd.exec))
+            @test !isempty(read(`$cmd --version`, String))
+        end
+    end
+
+    # Each JLL is only available when MPIPreferences.binary names it, so each one is tested in its own
+    # process with its own LocalPreferences.toml. The default is tested without a LocalPreferences.toml.
+    project = temporary_project(nothing)
+    try
+        @testset "default preferences, in a project that depends only on MPIEnsemble" begin
+            if !jll_artefact_installed("MPICH_jll", MPI_TAGS["MPICH_jll"])
+                @info "not testing the default mpiexec in a temporary project: " *
+                    "the artefact of MPICH_jll is not installed"
+            else
+                out = mpiexec_in_project(project)
+                @test occursin("binary=MPICH_jll\n", out)
+                @test occursin("active_project_has_jll=false\n", out)
+                @test length(split(strip(out), '\n')) > 3
+            end
+        end
+
+        for name in JLL_BINARIES
+            if !jll_artefact_installed(name, MPI_TAGS[name])
+                @info "not testing $name: its artefact is not installed, and the tests do not download it"
+                continue
+            end
+            @testset "$name" begin
+                binary_project = temporary_project(name)
+                try
+                    out = mpiexec_in_project(binary_project)
+                    @test occursin("binary=$name\n", out)
+                    @test occursin("active_project_has_jll=false\n", out)
+                    @test length(split(strip(out), '\n')) > 3
+                finally
+                    rm(binary_project; recursive = true, force = true)
+                end
+            end
+        end
+    finally
+        rm(project; recursive = true, force = true)
+    end
+end
+
+@testset "MpiLauncher JLL binaries that are not the selected one" begin
+    # A JLL provides its MPI only when MPIPreferences.binary names it, so the other JLLs have no mpiexec here.
+    for name in JLL_BINARIES
+        name == MPIPreferences.binary && continue
+        @test_throws "does not provide mpiexec for MPIPreferences.binary = \"$(MPIPreferences.binary)\"" mpiexec_command(name)
+    end
 end
 
 @testset "MpiLauncher argument and environment errors" begin

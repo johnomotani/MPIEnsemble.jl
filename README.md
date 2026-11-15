@@ -74,6 +74,15 @@ effect is that the REPL's `displaysize` reports the tall row count instead of th
 output is not truncated to the pane height, and programs that use the terminal height see the tall
 count. An invalid value, such as `0` or `abc`, is an error when the window is opened.
 
+## Wrapper
+
+`src/wrapper/wrapper.py` is the per-rank process that runs one Julia REPL in a pseudo-terminal and
+relays it over a Unix socket to the window. It uses only the Python 3.11 standard library and runs on
+Linux only. Its docstring gives the environment variables, the frame format and the shutdown and failure
+behaviour. The Julia side that starts it under `mpiexec` is not written yet, so the window does not
+use the wrapper so far. Its tests are in `test/wrapper` (Python unit tests) and `test/test_wrapper.jl`
+(which runs them, and a round trip from Julia), and need Python 3.11 or later on the PATH.
+
 ## Tests
 
 ```

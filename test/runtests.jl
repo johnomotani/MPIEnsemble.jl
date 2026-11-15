@@ -19,4 +19,5 @@ using MPIEnsemble
     include("test_tabset.jl")
     include("test_repl_pane.jl")
     include("test_rank_count.jl")
+    include("test_wrapper.jl")
 end

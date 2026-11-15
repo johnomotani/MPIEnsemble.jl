@@ -1,6 +1,7 @@
 """Tests for src/wrapper/wrapper.py, run by its own interpreter.
 
-Run with `python3 -B -m unittest discover -s test/wrapper`. Each test starts the wrapper with the
+Run with any Python 3.11 or later, for example `python3 -B -m unittest discover -s test/wrapper`
+(the Julia tests run them with the interpreter from Python_jll). Each test starts the wrapper with the
 interpreter that runs the tests, and julia from PATH. The tests need Linux, and a julia on PATH.
 """
 

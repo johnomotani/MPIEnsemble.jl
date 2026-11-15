@@ -1,7 +1,7 @@
 # Tests for a REPL over a rank's launcher connection (`Repl(log, connection; rows, cols)`). The ranks are
 # started by the fake launcher (test/mpi/fake_mpiexec.sh). Most tests use the real wrapper, so each rank
 # runs a julia REPL; the failure and exit-frame tests use the fake wrapper (test/mpi/fake_wrapper.py) and
-# need no julia. These need sh, setsid and python3 (3.11 or later), and no display.
+# need no julia. These need sh and setsid, and no display; the wrapper runs with the Python from Python_jll.
 
 const RC_RS = MPIEnsemble.ReplSession
 const RC_LL = MPIEnsemble.LineLog

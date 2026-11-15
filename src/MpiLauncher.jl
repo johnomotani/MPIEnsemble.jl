@@ -7,7 +7,7 @@ import MPIPreferences
 using Sockets: listen, accept
 
 export Frame, Job, RankConnection, FrameDecoder, encode_frame, decode!, launch, shutdown!,
-    take_frame!, send_input!, send_resize!, send_interrupt!, exit_status, mpiexec_command
+    take_frame!, send_input!, send_resize!, send_interrupt!, exit_status, mpiexec_command, python_executable
 
 const T_DATA = 0x01
 const T_RESIZE = 0x02
@@ -214,16 +214,58 @@ function check_launcher(launcher::Cmd)
     return nothing
 end
 
-# The absolute path of python3, which must be Python 3.11 or later.
-function check_python()
-    python = Sys.which("python3")
-    python === nothing && error("python3 is not on PATH; the MPI ranks run wrapper.py, which needs Python " *
-        "$(join(MIN_PYTHON, ".")) or later")
+"""
+    python_executable() -> String
+
+The path of the Python interpreter from Python_jll, which runs wrapper.py in each rank. It is the program of
+the command that `Python_jll.python()` returns. That command also sets LD_LIBRARY_PATH, which the interpreter
+does not need, as it finds its library from its own location; so only the program is used.
+
+Python_jll is loaded by the first call. Its initialisation sets PYTHONHOME in the process environment, which
+is restored afterwards, so the julia and MPI processes started later do not inherit it.
+
+Throws an error if Python_jll is not in the manifest of MPIEnsemble or its executable is missing.
+"""
+function python_executable()
+    jll = load_python_jll()
+    python = Base.invokelatest(getfield(jll, :python))
+    return String(first(python.exec))
+end
+
+# Load Python_jll, a dependency of MPIEnsemble, and undo the changes its initialisation makes to ENV.
+function load_python_jll()
+    pkgid = Base.identify_package(parentmodule(@__MODULE__), "Python_jll")
+    pkgid === nothing && error("Python_jll is not in the manifest of MPIEnsemble, so its Python cannot be " *
+        "found; resolve the package environment that loads MPIEnsemble")
+    before = Dict(ENV)
+    try
+        return Base.require(pkgid)
+    finally
+        restore_environment!(before)
+    end
+end
+
+# Make ENV hold exactly the entries of `before`.
+function restore_environment!(before::Dict{String, String})
+    for key in collect(keys(ENV))
+        haskey(before, key) || delete!(ENV, key)
+    end
+    for (key, value) in before
+        get(ENV, key, nothing) == value || (ENV[key] = value)
+    end
+    return nothing
+end
+
+# Checks that `python` is an executable that runs Python 3.11 or later, and returns it. The check runs the
+# interpreter that the ranks will run.
+function check_python(python::AbstractString)
+    (isfile(python) && Sys.isexecutable(python)) ||
+        error("the Python interpreter \"$python\" was not found or is not executable")
     parts = split(readchomp(`$python -c "import sys; print(sys.version_info[0], sys.version_info[1])"`))
     version = parse.(Int, parts)
     (version[1], version[2]) >= MIN_PYTHON || error("wrapper.py needs Python $(join(MIN_PYTHON, ".")) or " *
-        "later, but $python is Python $(join(version, "."))")
-    return python
+        "later, but \"$python\" is Python $(join(version, "."))")
+    return String(python)
 end
 
 # A new directory for the socket, made under XDG_RUNTIME_DIR, and the socket path in it.
@@ -468,27 +510,29 @@ function connect_ranks(server, process::Base.Process, nranks::Integer, timeout::
 end
 
 """
-    launch(nranks, rows, cols; launcher = mpiexec_command(), timeout = 60, wrapper = WRAPPER_SCRIPT) -> Job
+    launch(nranks, rows, cols; launcher = mpiexec_command(), python = python_executable(),
+        timeout = 60, wrapper = WRAPPER_SCRIPT) -> Job
 
-Start `nranks` wrappers under `launcher`, as `launcher -n nranks python3 wrapper`, and return once all of them
+Start `nranks` wrappers under `launcher`, as `launcher -n nranks python wrapper`, and return once all of them
 have connected and been sent the initial terminal size of `rows` by `cols` characters.
 
-`launcher` is a command, such as `mpiexec_command()`. The launcher, the wrappers and their julia processes
-run in a new session, so that `shutdown!` can stop all of them. The ranks find the julia running this process
-first on their PATH, and get `JULIA_PROJECT` from the active project. `timeout` is the number of seconds
-allowed for all the ranks to connect.
+`launcher` is a command, such as `mpiexec_command()`. `python` is the path of a Python 3.11 or later
+interpreter, by default the one from Python_jll. The launcher, the wrappers and their julia processes run in
+a new session, so that `shutdown!` can stop all of them. The ranks find the julia running this process first
+on their PATH, and get `JULIA_PROJECT` from the active project. `timeout` is the number of seconds allowed for
+all the ranks to connect.
 
 Throws an error, after stopping the launcher, if the launcher is not found, exits before all ranks connect,
 a wrapper sends a HELLO with the wrong number of ranks or an invalid rank, or the ranks do not all connect
-within `timeout` seconds. Also throws if python3 is missing or older than 3.11, or if XDG_RUNTIME_DIR is
-unset or leads to a socket path of 100 bytes or more.
+within `timeout` seconds. Also throws if `python` is not an executable or is older than 3.11, or if
+XDG_RUNTIME_DIR is unset or leads to a socket path of 100 bytes or more.
 """
 function launch(nranks::Integer, rows::Integer, cols::Integer; launcher::Cmd = mpiexec_command(),
-        timeout::Real = 60, wrapper::AbstractString = WRAPPER_SCRIPT)
+        python::AbstractString = python_executable(), timeout::Real = 60, wrapper::AbstractString = WRAPPER_SCRIPT)
     nranks >= 1 || throw(ArgumentError("the number of ranks must be at least 1, got $nranks"))
     timeout > 0 || throw(ArgumentError("the timeout must be positive, got $timeout"))
     resize = resize_payload(rows, cols)
-    python = check_python()
+    python = check_python(python)
     check_launcher(launcher)
     setsid = Sys.which("setsid")
     setsid === nothing && error("setsid is not on PATH; it starts the MPI launcher in its own session")

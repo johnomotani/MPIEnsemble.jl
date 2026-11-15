@@ -1,8 +1,10 @@
 """Per-rank wrapper: runs one Julia REPL in a pseudo-terminal and relays it over a Unix socket.
 
-Start one wrapper per MPI rank, for example `mpiexec -n 2 python3 wrapper.py`. Uses only the
-standard library. Requires Linux and Python 3.11 or later (for `os.login_tty`); on other
-systems it exits with status 1 and a message on stderr.
+Start one wrapper per MPI rank, for example `mpiexec -n 2 PYTHON wrapper.py`, where PYTHON is the
+Python interpreter; `MpiLauncher.python_executable()` returns the one from Python_jll. Uses only the
+standard library.
+Requires Linux and Python 3.11 or later (for `os.login_tty`); on other systems it exits with status 1
+and a message on stderr.
 
 Environment
     Rank and size are read from the first complete pair that is set:

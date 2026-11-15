@@ -108,11 +108,13 @@ Julia; its launcher is `mpiexec` on the PATH unless another command is given wit
 ## Wrapper
 
 `src/wrapper/wrapper.py` is the per-rank process that runs one Julia REPL in a pseudo-terminal and
-relays it over a Unix socket to the window. It uses only the Python 3.11 standard library and runs on
-Linux only. Its docstring gives the environment variables, the frame format and the shutdown and failure
+relays it over a Unix socket to the window. It runs with the Python interpreter provided by the
+Python_jll package, which is Python 3.11 or later, so no system Python is needed. Installing this package
+downloads that interpreter, which is about 54 MB. The wrapper uses only the Python standard library and runs
+on Linux only. Its docstring gives the environment variables, the frame format and the shutdown and failure
 behaviour. The window starts one wrapper per rank under `mpiexec`, through `MpiLauncher.jl`. Its tests are in
-`test/wrapper` (Python unit tests) and `test/test_wrapper.jl` (which runs them, and a round trip from Julia), and
-need Python 3.11 or later on the PATH.
+`test/wrapper` (Python unit tests) and `test/test_wrapper.jl` (which runs them, and a round trip from Julia).
+Both use the same Python_jll interpreter, so `python3` on the PATH is not used.
 
 ## Tests
 

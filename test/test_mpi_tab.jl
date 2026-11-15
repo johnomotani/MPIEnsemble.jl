@@ -2,8 +2,8 @@
 # the rank panes are the window's `TabView`s. The ranks are started by the fake launcher
 # (test/mpi/fake_mpiexec.sh) with the fake wrapper (test/mpi/fake_wrapper.py), so no julia runs in a rank,
 # except for the one test that checks the REPL tab after a failed launch. The fake wrapper's mode is set
-# with FAKE_WRAPPER_MODE, which applies to every rank, or to one rank as MODE@RANK. These tests need sh,
-# setsid and python3 (3.11 or later), and no display.
+# with FAKE_WRAPPER_MODE, which applies to every rank, or to one rank as MODE@RANK. These tests need sh and
+# setsid, and no display; the wrapper runs with the Python from Python_jll.
 
 # Loading QML creates a QGuiApplication, which needs a Qt platform plugin; the offscreen one does not need
 # a display (see test_repl_pane.jl).

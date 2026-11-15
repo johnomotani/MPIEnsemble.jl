@@ -1,13 +1,13 @@
 # Tests for MpiLauncher. Most tests use a fake launcher (test/mpi/fake_mpiexec.sh), which starts the
 # program once per rank, and either a fake wrapper (test/mpi/fake_wrapper.py, no julia) or the real
-# wrapper with a julia REPL per rank. Those run wherever sh, setsid and python3 (3.11 or later) exist.
-# The testset "real MPI launcher" needs an mpiexec on PATH and is not run otherwise.
+# wrapper with a julia REPL per rank. The wrapper runs with the Python from Python_jll, so these need only
+# sh and setsid. The testset "real MPI launcher" needs an mpiexec on PATH and is not run otherwise.
 
 using Artifacts: artifact_exists, artifact_hash
 using TOML
 using MPIEnsemble.MpiLauncher
 using MPIEnsemble.MpiLauncher: MAX_PAYLOAD, T_DATA, T_RESIZE, T_SIGNAL, T_HELLO, T_EXIT, resize_payload,
-    parse_hello, mpiexec_from_preference, JLL_BINARIES, MPIPreferences
+    parse_hello, mpiexec_from_preference, JLL_BINARIES, MPIPreferences, python_executable
 
 const FAKE_LAUNCHER = Cmd(["sh", joinpath(@__DIR__, "mpi", "fake_mpiexec.sh")])
 const FAKE_WRAPPER = joinpath(@__DIR__, "mpi", "fake_wrapper.py")
@@ -259,8 +259,17 @@ end
     @test_throws ArgumentError launch(1, 24, 80; launcher = FAKE_LAUNCHER, timeout = 0)
     @test_throws "was not found" launch(1, 24, 80; launcher = Cmd(["/nonexistent/mpiexec"]))
     no_launch() = launch(1, 24, 80; launcher = FAKE_LAUNCHER)
-    @test_throws "python3 is not on PATH" withenv(no_launch, "PATH" => "")
     @test_throws "XDG_RUNTIME_DIR is not set" withenv(no_launch, "XDG_RUNTIME_DIR" => nothing)
+    missing_python = joinpath(tempdir(), "no-such-python-$(getpid())")
+    @test_throws "the Python interpreter \"$missing_python\" was not found or is not executable" launch(1, 24, 80;
+        launcher = FAKE_LAUNCHER, python = missing_python)
+    mktempdir() do dir
+        old_python = joinpath(dir, "python")
+        write(old_python, "#!/bin/sh\necho 3 10\n")
+        chmod(old_python, 0o755)
+        @test_throws "wrapper.py needs Python 3.11 or later, but \"$old_python\" is Python 3.10" launch(1, 24, 80;
+            launcher = FAKE_LAUNCHER, python = old_python)
+    end
     long = joinpath(tempdir(), "x"^70)
     mkpath(long)
     try
@@ -361,8 +370,56 @@ end
     end
 end
 
+@testset "python_executable leaves the environment as it was" begin
+    # Loading Python_jll changes the environment, so each run loads it in a new process, with PYTHONHOME set
+    # to a value and then unset.
+    script = """
+        using MPIEnsemble.MpiLauncher: python_executable
+        before = Dict(ENV)
+        python = python_executable()
+        println("ENVCHECK ", isfile(python), " ", Dict(ENV) == before, " ", repr(get(ENV, "PYTHONHOME", "unset")))
+        """
+    for value in ("/sentinel/home", nothing)
+        out = withenv("PYTHONHOME" => value, "JULIA_LOAD_PATH" => nothing) do
+            read(`$(Base.julia_cmd()) --project=$(Base.active_project()) --startup-file=no -e $script`, String)
+        end
+        expected = value === nothing ? "unset" : value
+        @test occursin("ENVCHECK true true $(repr(expected))", out)
+    end
+end
+
+@testset "MpiLauncher does not look for python3 on PATH" begin
+    # PATH holds only sh and setsid, which launch needs. The ranks start with the Python from Python_jll.
+    mktempdir() do dir
+        bin = joinpath(dir, "bin")
+        mkdir(bin)
+        for tool in ("sh", "setsid")
+            symlink(Sys.which(tool), joinpath(bin, tool))
+        end
+        with_runtime() do
+            withenv("PATH" => bin) do
+                @test Sys.which("python3") === nothing
+                job = launch(1, 24, 80; launcher = FAKE_LAUNCHER, timeout = REPL_TIMEOUT)
+                try
+                    conn = job.ranks[1]
+                    send_input!(conn, Vector{UInt8}(codeunits("println(\"rank-ok \", ENV[\"OMPI_COMM_WORLD_RANK\"])\r")))
+                    @test occursin("rank-ok 0", read_until(conn, "rank-ok 0"))
+                    send_input!(conn, Vector{UInt8}(codeunits("exit()\r")))
+                    @test read_exit(conn) == (0, 0)
+                finally
+                    shutdown!(job)
+                end
+            end
+        end
+    end
+end
+
 @testset "MpiLauncher with the real wrapper and julia, using the fake launcher" begin
     with_runtime() do
+        # The ranks inherit this process's environment. The expected values are read before the launch, which
+        # loads Python_jll, so a PYTHONHOME or LD_LIBRARY_PATH from the interpreter would make them differ.
+        expected_env = "ENVCHECK " * repr(get(ENV, "PYTHONHOME", "unset")) * " " *
+            repr(get(ENV, "LD_LIBRARY_PATH", "unset"))
         job = launch(2, 24, 80; launcher = FAKE_LAUNCHER, timeout = REPL_TIMEOUT)
         try
             for conn in job.ranks
@@ -370,6 +427,10 @@ end
             end
             for conn in job.ranks
                 @test occursin("hello from $(conn.rank)", read_until(conn, "hello from $(conn.rank)"))
+                check_env = "println(\"ENVCHECK \", repr(get(ENV, \"PYTHONHOME\", \"unset\")), \" \", " *
+                    "repr(get(ENV, \"LD_LIBRARY_PATH\", \"unset\")))\r"
+                send_input!(conn, Vector{UInt8}(codeunits(check_env)))
+                @test occursin(expected_env, read_until(conn, expected_env; timeout = 60))
             end
             for conn in job.ranks
                 send_input!(conn, Vector{UInt8}(codeunits("exit()\r")))

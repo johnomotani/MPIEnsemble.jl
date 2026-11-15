@@ -1,9 +1,10 @@
 # Tests for the per-rank Python wrapper, src/wrapper/wrapper.py. The Python unit tests in test/wrapper
-# run under the python3 on PATH, which must be Python 3.11 or later. A round trip from Julia drives
+# run under the Python from Python_jll, which the launcher uses too. A round trip from Julia drives
 # the wrapper over a Unix socket, with a julia child that is started from the same binary as this
 # process.
 
 using Sockets: listen, accept
+using MPIEnsemble.MpiLauncher: python_executable, check_python
 
 const WRAPPER_SCRIPT = joinpath(@__DIR__, "..", "src", "wrapper", "wrapper.py")
 const WRAPPER_TESTS = joinpath(@__DIR__, "wrapper")
@@ -11,14 +12,8 @@ const WRAPPER_DATA, WRAPPER_RESIZE, WRAPPER_SIGNAL, WRAPPER_HELLO, WRAPPER_EXIT 
 # Seconds allowed for a whole wrapper session, including the startup of julia.
 const WRAPPER_TIMEOUT = 120
 
-# The python3 on PATH, which must be 3.11 or later. Fails rather than skipping when it is not.
-function wrapper_python()
-    python = Sys.which("python3")
-    python === nothing && error("python3 is not on PATH; the wrapper tests need Python 3.11 or later")
-    version = VersionNumber(readchomp(`$python -c "import sys; print('%d.%d.%d' % sys.version_info[:3])"`))
-    version >= v"3.11" || error("python3 on PATH is Python $version ($python); the wrapper tests need Python 3.11 or later")
-    return python
-end
+# The Python from Python_jll, checked to be 3.11 or later. Fails rather than skipping when it is not.
+wrapper_python() = check_python(python_executable())
 
 # The wrapper's environment: no TERM, DISPLAY or MPI rank variables, plus the given socket and PATH.
 # With `rank` given, the rank variables describe rank `rank` of one rank.

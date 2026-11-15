@@ -7,6 +7,7 @@
 module ReplPane
 
 import ..ReplSession
+import ..MpiLauncher
 using ..ReplSession: Repl, is_started
 using ..LineLog: RankLog
 using ..VTParse: screen_lines
@@ -23,6 +24,11 @@ const PROMPT = "julia>"
 The log, pane and REPL of one tab, which runs `command`. `startup_input` is written to the first
 session's terminal when its first prompt appears, and is empty for tabs that do not need it. `tall_rows`
 is `nothing` or the number of rows for the terminal and the screen model (see `Gui.run_single_repl`).
+
+    State(connection::MpiLauncher.RankConnection, rows, cols; changed = () -> nothing)
+
+The log, pane and REPL of one MPI rank, whose julia is reached over `connection`. `rows` and `cols` are the
+terminal size the launcher gave the rank. The rank's session cannot be restarted (see `ReplSession.Repl`).
 
 `changed` is called with no arguments when the pane's rows are refilled while the tab is visible, so
 that the caller can publish them. `visible` is false until `set_visible!` says otherwise, and no
@@ -44,10 +50,19 @@ end
 function State(command::Cmd, startup_input::AbstractString, tall_rows::Union{Nothing, Int};
         changed = () -> nothing)
     log = RankLog(0)
+    return build(log, Repl(log, command), String(startup_input), tall_rows, changed)
+end
+
+function State(connection::MpiLauncher.RankConnection, rows::Integer, cols::Integer;
+        changed = () -> nothing)
+    log = RankLog(0)
+    return build(log, Repl(log, connection; rows, cols), "", nothing, changed)
+end
+
+function build(log::RankLog, repl::Repl, startup_input::String, tall_rows::Union{Nothing, Int}, changed)
     holder = Ref{Any}(nothing)
     pane = Pane(log, 1; notify = (p, kind, first, last) -> refilled!(holder[], kind))
-    repl = Repl(log, command)
-    st = State(log, pane, repl, String(startup_input), tall_rows, changed, false, false, false)
+    st = State(log, pane, repl, startup_input, tall_rows, changed, false, false, false)
     holder[] = st
     return st
 end

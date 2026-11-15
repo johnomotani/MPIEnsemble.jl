@@ -8,6 +8,9 @@ starting julia. FAKE_WRAPPER_MODE selects what it does:
     wrong_size   Sends HELLO with one more rank than the launch has.
     ignore_close Ignores SIGTERM and, when the socket closes, sleeps and does not exit.
     silent       Never connects.
+
+Any mode may be given as MODE@RANK, which applies it to that rank only. The echo mode writes "resize R C"
+for each RESIZE frame it receives, and the initial one.
 """
 import os
 import select
@@ -22,6 +25,11 @@ T_DATA, T_RESIZE, T_SIGNAL, T_HELLO, T_EXIT = 1, 2, 3, 4, 5
 rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
 size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
 mode = os.environ.get("FAKE_WRAPPER_MODE", "echo")
+# A mode of the form MODE@RANK applies to that rank only; the other ranks echo.
+if "@" in mode:
+    mode, _, only_rank = mode.partition("@")
+    if int(only_rank) != rank:
+        mode = "echo"
 
 
 def frame(frame_type, payload=b""):

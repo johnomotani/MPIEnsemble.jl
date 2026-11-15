@@ -3,7 +3,8 @@
 A window of per-rank terminal panes for interactive MPI work in Julia. Linux
 only; requires Julia 1.13 or later.
 
-This package is under development. The window so far shows Julia REPLs in tabs.
+This package is under development. The window shows Julia REPLs in tabs, and, with a rank count, an MPI tab
+with one REPL per MPI rank.
 
 ## Usage
 
@@ -11,11 +12,28 @@ This package is under development. The window so far shows Julia REPLs in tabs.
 julia --project -m MPIEnsemble [RANKS]
 ```
 
-The optional argument `RANKS` is the number of MPI ranks, a positive integer. The window records it. Without
-it, the window shows a dialog that asks for the number; OK records it, and Cancel closes the window, which then
-ends the program without error. The window does not start MPI ranks or show MPI panes yet: the number is only
-recorded. The launcher that starts the ranks, `MpiLauncher.jl`, can be used on its own: it starts one wrapper
-per rank under the `mpiexec` given by MPIPreferences.jl and connects to each over a socket.
+The optional argument `RANKS` is the number of MPI ranks, a positive integer. Without it, the window shows a
+dialog that asks for the number; OK records it, and Cancel closes the window, which then ends the program
+without error.
+
+With a number, the window opens an MPI tab after the first REPL tab and starts that many ranks under the
+`mpiexec` given by MPIPreferences.jl (see MPI builds below). The tab says "Starting N MPI ranks…" until the
+job has started, and this does not block the window, so the REPL tabs work meanwhile. Then the tab shows one
+REPL pane per rank, in rank order, in a grid with ceil(sqrt(N)) columns and cells of equal size. Each rank's
+REPL runs in its own Julia process. The keys, paste and mouse selection work in a rank pane as they do in a
+REPL pane, and the pane resizes with the window. Clicking a pane gives it the keyboard focus: its border is
+bright, and the other panes have dim borders. Keys and paste go only to the focused rank.
+
+If the ranks do not start, for example because the launcher is not found or the ranks do not connect within
+60 seconds, the MPI tab shows the error and the error is also printed to standard error. The REPL tabs keep
+working. When a rank's Julia exits, its pane shows the exit code, and says that restarting needs the whole MPI
+job to restart; a rank pane has no Restart button. If a rank's connection closes without its exit report,
+the error is shown in that rank's pane, and the other ranks keep working.
+
+Closing the MPI tab ends the job, and the MPI tab is not opened again: start the window again to launch the
+ranks again. Closing the window also ends the job. Either way, the wrapper processes and the launcher stop.
+
+The launcher that starts the ranks, `MpiLauncher.jl`, can also be used on its own.
 
 The following are not implemented yet: pane labels with the rank number, input broadcast to all ranks, and
 restarting or killing a single rank.
@@ -23,7 +41,8 @@ restarting or killing a single rank.
 The window needs a display (on Linux, for example, an X server or Wayland session).
 
 The window has a tab bar across its top, with one tab for each REPL, titled "Julia 1", "Julia 2" and so on
-in the order they were opened. Clicking a tab shows its REPL, and the "+" button at the end of the bar opens
+in the order they were opened. The MPI tab, when there is one, is titled "MPI" and comes after the first REPL
+tab. Clicking a tab shows its REPL, and the "+" button at the end of the bar opens
 another REPL tab and shows it. Each tab has its own REPL, output, scrollback, selection and restart prompt.
 A tab's close button, or a middle-click on the tab, closes it and ends its REPL; the tab to its right is then
 shown, or the tab to its left if there is none. Closing the last tab closes the window, and so does closing
@@ -92,9 +111,9 @@ Julia; its launcher is `mpiexec` on the PATH unless another command is given wit
 `src/wrapper/wrapper.py` is the per-rank process that runs one Julia REPL in a pseudo-terminal and
 relays it over a Unix socket to the window. It uses only the Python 3.11 standard library and runs on
 Linux only. Its docstring gives the environment variables, the frame format and the shutdown and failure
-behaviour. The Julia side that starts it under `mpiexec` is not written yet, so the window does not
-use the wrapper so far. Its tests are in `test/wrapper` (Python unit tests) and `test/test_wrapper.jl`
-(which runs them, and a round trip from Julia), and need Python 3.11 or later on the PATH.
+behaviour. The window starts one wrapper per rank under `mpiexec`, through `MpiLauncher.jl`. Its tests are in
+`test/wrapper` (Python unit tests) and `test/test_wrapper.jl` (which runs them, and a round trip from Julia), and
+need Python 3.11 or later on the PATH.
 
 ## Tests
 

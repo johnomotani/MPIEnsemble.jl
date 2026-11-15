@@ -1,5 +1,6 @@
 # The tabs of a window: an ordered list of tabs, one of which is selected while any tab is open. This
-# file does not use QML, so the tab rules can be tested without a display.
+# file does not use QML, so the tab rules can be tested without a display. A tab's state, and the panes
+# that show it, are defined by the window (Gui.jl).
 #
 # Each tab has an id that is never reused in the window, and a number that gives its title. Closed ids
 # are kept, so that a call for a closed tab, which can arrive from a queued event, is told apart from
@@ -10,13 +11,18 @@ export Tab, Tabs, open!, close!, select!, selected_id, is_open, index_of, check_
     window_should_close, tab_label, drain_fairly!
 
 # Title prefix for each kind of tab that `open!` accepts.
-const KIND_NAMES = Dict(:repl => "Julia")
+const KIND_NAMES = Dict(:repl => "Julia", :mpi => "MPI")
+
+# Kinds whose titles carry a number, as in "Julia 2". The other kinds are titled by their prefix alone, and
+# have number 0.
+const NUMBERED_KINDS = (:repl,)
 
 """
     Tab(id, kind, number, state)
 
-A tab of a window. `id` identifies it for the window's lifetime, `number` numbers it in the title, and
-`state` is the object that holds what the tab shows, which this file does not inspect.
+A tab of a window. `id` identifies it for the window's lifetime, `number` numbers it in the title (0 for
+kinds that are not numbered), and `state` is the object that holds what the tab shows, which this file does
+not inspect.
 """
 struct Tab
     id::Int
@@ -51,6 +57,7 @@ The title of `tab`, such as `Julia 2`.
 function tab_title(tab::Tab)
     prefix = get(KIND_NAMES, tab.kind, nothing)
     prefix === nothing && throw(ArgumentError("no title for tabs of kind $(tab.kind)"))
+    tab.kind in NUMBERED_KINDS || return prefix
     return "$prefix $(tab.number)"
 end
 
@@ -64,14 +71,15 @@ tab_label(tab::Tab, ended::Bool) = ended ? tab_title(tab) * " (ended)" : tab_tit
 """
     open!(ts, kind, state) -> Tab
 
-Add a tab of `kind` at the end of `ts`, holding `state`, and select it. The new tab takes the next id
-and the next number, neither of which is used by another tab in this window.
+Add a tab of `kind` at the end of `ts`, holding `state`, and select it. The new tab takes the next id,
+which no other tab in this window uses. A numbered kind also takes the next number; other kinds have number 0.
 """
 function open!(ts::Tabs, kind::Symbol, state)
     haskey(KIND_NAMES, kind) || throw(ArgumentError("unknown tab kind $kind"))
-    tab = Tab(ts.next_id, kind, ts.next_number, state)
+    numbered = kind in NUMBERED_KINDS
+    tab = Tab(ts.next_id, kind, numbered ? ts.next_number : 0, state)
     ts.next_id += 1
-    ts.next_number += 1
+    numbered && (ts.next_number += 1)
     push!(ts.tabs, tab)
     ts.selected = tab.id
     return tab

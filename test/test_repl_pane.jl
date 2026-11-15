@@ -176,7 +176,8 @@ const RP_GUI = Base.invokelatest(getfield, MPIEnsemble, :Gui)
     try
         RP_GUI.new_tab!(win)
         tab = only(win.tabs.tabs)
-        view = win.views[tab.id]
+        view = tab.state
+        @test win.views[view.id] === view
         @test view.session.visible
         @test !MPIEnsemble.ReplSession.is_started(view.session.repl)
         @test win.tabs.selected == tab.id
@@ -191,9 +192,9 @@ end
     try
         RP_GUI.new_tab!(win)
         RP_GUI.new_tab!(win)
-        first_id, second_id = [t.id for t in win.tabs.tabs]
-        @test win.views[first_id].session.startup_input == "println(1)\r"
-        @test win.views[second_id].session.startup_input == ""
+        first, second = [t.state for t in win.tabs.tabs]
+        @test first.session.startup_input == "println(1)\r"
+        @test second.session.startup_input == ""
         @test !win.startup_pending
     finally
         RP_GUI.shutdown!(win)
@@ -205,7 +206,8 @@ end
     RP_GUI.new_tab!(win)
     RP_GUI.new_tab!(win)
     kept_id, failing_id = [t.id for t in win.tabs.tabs]
-    win.views[failing_id].session.repl.writer_error[] = ErrorException("injected writer failure")
+    failing_pane = win.tabs.tabs[2].state.id
+    win.views[failing_pane].session.repl.writer_error[] = ErrorException("injected writer failure")
     err = try
         RP_GUI.close_tab!(win, failing_id)
         nothing
@@ -214,7 +216,7 @@ end
     end
     @test err isa ErrorException && occursin("injected writer failure", err.msg)
     @test !MPIEnsemble.TabSet.is_open(win.tabs, failing_id)
-    @test !haskey(win.views, failing_id)
+    @test !haskey(win.views, failing_pane)
     @test [t.id for t in win.tabs.tabs] == [kept_id]
     @test RP_GUI.shutdown!(win) === nothing
 end
@@ -224,7 +226,7 @@ end
     try
         RP_GUI.new_tab!(win)
         RP_GUI.new_tab!(win)
-        hidden_id, shown_id = [t.id for t in win.tabs.tabs]
+        hidden_id, shown_id = [t.state.id for t in win.tabs.tabs]
         @test !win.views[hidden_id].session.visible
         @test win.views[shown_id].session.visible
 

@@ -122,7 +122,19 @@ end
     b = TS.open!(ts, :repl, "b")
     @test TS.tab_label(b, false) == "Julia 2"
     @test TS.tab_label(b, true) == "Julia 2 (ended)"
-    @test_throws ArgumentError TS.open!(ts, :mpi, "x")
+    @test_throws ArgumentError TS.open!(ts, :bogus, "x")
+end
+
+@testset "TabSet: the MPI tab is titled without a number" begin
+    ts = TS.Tabs()
+    a = TS.open!(ts, :repl, "a")
+    m = TS.open!(ts, :mpi, "m")
+    b = TS.open!(ts, :repl, "b")
+    @test TS.tab_title(m) == "MPI"
+    @test TS.tab_label(m, false) == "MPI"
+    @test m.number == 0
+    @test TS.tab_title(a) == "Julia 1"
+    @test TS.tab_title(b) == "Julia 2"
 end
 
 # A fixed sequence of pseudo-random numbers in 0:1 (a linear congruential generator), so that the

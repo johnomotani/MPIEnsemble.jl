@@ -20,4 +20,5 @@ using MPIEnsemble
     include("test_repl_pane.jl")
     include("test_rank_count.jl")
     include("test_wrapper.jl")
+    include("test_mpi_launcher.jl")
 end

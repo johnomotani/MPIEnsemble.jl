@@ -19,6 +19,7 @@ include("ReplSession.jl")
 include("PaneModel.jl")
 include("ReplPane.jl")
 include("TabSet.jl")
+include("MpiLauncher.jl")
 
 const GUI_FILE = joinpath(@__DIR__, "Gui.jl")
 

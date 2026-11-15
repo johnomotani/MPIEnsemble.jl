@@ -13,8 +13,12 @@ julia --project -m MPIEnsemble [RANKS]
 
 The optional argument `RANKS` is the number of MPI ranks, a positive integer. The window records it. Without
 it, the window shows a dialog that asks for the number; OK records it, and Cancel closes the window, which then
-ends the program without error. Launching MPI ranks is not implemented yet, so for now the number is only
-recorded and no ranks are started.
+ends the program without error. The window does not start MPI ranks or show MPI panes yet: the number is only
+recorded. The launcher that starts the ranks, `MpiLauncher.jl`, can be used on its own: it starts one wrapper
+per rank under the `mpiexec` given by MPIPreferences.jl and connects to each over a socket.
+
+The following are not implemented yet: pane labels with the rank number, input broadcast to all ranks, and
+restarting or killing a single rank.
 
 The window needs a display (on Linux, for example, an X server or Wayland session).
 

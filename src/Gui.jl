@@ -73,6 +73,9 @@ The state of an MPI tab. `views` holds one pane per rank, in rank order, once th
 the job, or the error that stopped the launch, or `nothing` while the launch is in progress. The event loop
 turns the result into panes and state (see `finish_launch!`), so the task itself never touches the window.
 `offset` is where the fair drain of the rank panes starts next time (see `TabSet.drain_fairly!`).
+`targets` is the set of ranks that receive input from the focused pane, and it holds every rank once the job
+has started (see `attach_job!`). `zoomed` is the rank that alone receives input, or `nothing`. Both are
+read by `route_targets`.
 """
 mutable struct MpiTab
     const nranks::Int
@@ -83,9 +86,11 @@ mutable struct MpiTab
     task::Union{Nothing, Task}
     result::Any
     offset::Int
+    targets::Set{Int}
+    zoomed::Union{Nothing, Int}
 end
 
-MpiTab(nranks::Int) = MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0)
+MpiTab(nranks::Int) = MpiTab(nranks, TabView[], :starting, nothing, nothing, nothing, nothing, 0, Set{Int}(), nothing)
 
 # State of the window. `views` maps the pane ids of the open panes to their views, and `closed_panes`
 # holds the ids of the panes that were closed. `tab_rows` is the tab bar's model. `repl_panes` and
@@ -335,9 +340,10 @@ function register_functions!(win::WindowState)
     # Text from QML arrives as a QString, whose code units are UTF-16. It is converted to a String
     # here, so that the bytes sent are UTF-8.
     QML.qmlfunction("keyPressed", (id, key, text, modifiers) ->
-        pane_call(view -> key_pressed!(view, key, String(text), modifiers), win, id, false))
+        pane_call(view -> key_input!(win, view, key, String(text), modifiers), win, id, false))
     QML.qmlfunction("isPasteChord", (key, modifiers) -> is_paste_chord(Int(key), Int(modifiers)))
-    QML.qmlfunction("pasteText", (id, text) -> pane_call(view -> paste_text!(view, String(text)), win, id, false))
+    QML.qmlfunction("pasteText", (id, text) ->
+        pane_call(view -> paste_input!(win, view, String(text)), win, id, false))
     QML.qmlfunction("selectionStart", (id, slot, col) ->
         pane_call(view -> selection_op!(view, p -> select_start!(p, Int(slot), Int(col))), win, id, nothing))
     QML.qmlfunction("selectionExtendStart", (id, slot, col) ->
@@ -584,6 +590,7 @@ function attach_job!(win::WindowState, mpi::MpiTab, job::MpiLauncher.Job)
     for (i, conn) in enumerate(job.ranks)
         conn.rank == i - 1 || error("connection $i of the job is for rank $(conn.rank), not rank $(i - 1)")
     end
+    mpi.targets = Set(0:(length(job.ranks) - 1))
     for conn in job.ranks
         push!(mpi.views, new_view(win, changed -> ReplPane.State(conn, RANK_ROWS, RANK_COLS; changed);
             rank = conn.rank))
@@ -726,8 +733,52 @@ function scroll_key!(view::TabView, key, modifiers)
     return view_op!(view, p -> scroll_action!(p, action))
 end
 
+# The MPI tab that holds `view` as one of its rank panes, or `nothing` for a REPL tab's pane.
+function mpi_tab_of(win::WindowState, view::TabView)
+    for tab in win.tabs.tabs
+        tab.kind === :mpi && any(v -> v === view, tab.state.views) && return tab.state
+    end
+    return nothing
+end
+
+# The rank panes that receive input from the focused rank pane of an MPI tab, in rank order: the zoomed
+# rank alone when one is zoomed, else the panes of the ranks in `targets`. Each target must have a pane,
+# so an error is raised for a target without one.
+function route_targets(mpi::MpiTab)
+    if mpi.zoomed !== nothing
+        views = [v for v in mpi.views if v.rank == mpi.zoomed]
+        length(views) == 1 || error("zoomed rank $(mpi.zoomed) has no pane in this MPI tab")
+        return views
+    end
+    views = [v for v in mpi.views if v.rank in mpi.targets]
+    length(views) == length(mpi.targets) || error("a target rank of this MPI tab has no pane")
+    return views
+end
+
+# Deliver input from the focused pane `view`, by calling `send(target)` for each pane that receives it.
+# In a REPL tab that is `view` alone. In an MPI tab it is every pane from `route_targets`, and the result is
+# whether `send` succeeded for `view`, which is false when `view` does not receive input.
+function route_input!(send, win::WindowState, view::TabView)
+    mpi = mpi_tab_of(win, view)
+    mpi === nothing && return send(view)
+    sent = false
+    for target in route_targets(mpi)
+        ok = send(target)
+        target === view && (sent = ok)
+    end
+    return sent
+end
+
+# Called from QML for each key press in a pane. Returns whether the focused pane's key was sent.
+key_input!(win::WindowState, view::TabView, key, text, modifiers) =
+    route_input!(target -> key_pressed!(target, key, text, modifiers), win, view)
+
+# Called from QML for each paste in a pane. Returns whether the focused pane's text was sent.
+paste_input!(win::WindowState, view::TabView, text) = route_input!(target -> paste_text!(target, text), win, view)
+
 # Called from QML for each key press. Returns whether the key was sent, so that QML accepts only
-# the events that were handled. Input is ignored once the child has exited.
+# the events that were handled. Input is ignored once the child has exited. Each pane encodes the key with
+# its own terminal state, since application-cursor mode is set per rank.
 function key_pressed!(view::TabView, key, text, modifiers)
     st = view.session
     is_started(st.repl) || error("keyboard input before the session has started")

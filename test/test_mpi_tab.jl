@@ -207,6 +207,139 @@ end
     end
 end
 
+# Whether every pane of `views` shows `text`.
+mt_all_show(views, text) = all(occursin(text, mt_text(v)) for v in views)
+
+@testset "MPI tab: input to the focused rank pane reaches every rank" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            @test isempty(mpi.targets)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+            @test mpi.targets == Set(0:2)
+            @test mpi.zoomed === nothing
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0, 1, 2]
+
+            # A key typed in rank 0's pane is echoed by every rank, and the focused pane reports it was sent.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "key-all", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "key-all"), win)
+            # The same for a paste, from the pane of rank 2.
+            @test MT_GUI.paste_input!(win, mpi.views[3], "paste-all") === true
+            mt_run_until(() -> mt_all_show(mpi.views, "paste-all"), win)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: a zoomed rank alone receives input" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            mpi.zoomed = 1
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [1]
+            # A key from rank 0's pane goes to the zoomed rank 1, and rank 0 does not handle it.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "from-zero", 0) === false
+            @test MT_GUI.key_input!(win, mpi.views[2], 0, "zoom-one", 0) === true
+            mt_run_until(() -> occursin("from-zero", mt_text(mpi.views[2])) &&
+                occursin("zoom-one", mt_text(mpi.views[2])), win)
+
+            # Input sent to a rank is echoed in the order it was sent, so once "after-zoom" has reached every
+            # rank, any earlier input sent to that rank has been echoed too.
+            mpi.zoomed = nothing
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "after-zoom", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "after-zoom"), win)
+            @test !occursin("from-zero", mt_text(mpi.views[1]))
+            @test !occursin("zoom-one", mt_text(mpi.views[1]))
+            @test !occursin("from-zero", mt_text(mpi.views[3]))
+            @test !occursin("zoom-one", mt_text(mpi.views[3]))
+
+            # A zoomed rank without a pane is an error.
+            mpi.zoomed = 7
+            @test_throws "zoomed rank 7 has no pane" MT_GUI.route_targets(mpi)
+            mpi.zoomed = nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: only the ranks in targets receive input" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 3; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin("resize 25 100", mt_text(v)) for v in mpi.views), win)
+
+            mpi.targets = Set([0, 2])
+            @test [v.rank for v in MT_GUI.route_targets(mpi)] == [0, 2]
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "subset-zero", 0) === true
+            mt_run_until(() -> occursin("subset-zero", mt_text(mpi.views[1])) &&
+                occursin("subset-zero", mt_text(mpi.views[3])), win)
+            # A key from rank 1's pane, which is not a target, goes to the targets. Rank 1 does not handle
+            # it, so the result is false.
+            @test MT_GUI.key_input!(win, mpi.views[2], 0, "subset-one", 0) === false
+            mt_run_until(() -> occursin("subset-one", mt_text(mpi.views[1])) &&
+                occursin("subset-one", mt_text(mpi.views[3])), win)
+            @test !occursin("subset-one", mt_text(mpi.views[2]))
+
+            # A target without a pane is an error, not a silent skip.
+            mpi.targets = Set([0, 5])
+            @test_throws "a target rank of this MPI tab has no pane" MT_GUI.route_targets(mpi)
+            mpi.targets = Set(0:2)
+
+            # Every rank is a target again. "subset-all" reaches every rank, and the earlier input has been
+            # echoed in each rank before it.
+            @test MT_GUI.key_input!(win, mpi.views[1], 0, "subset-all", 0) === true
+            mt_run_until(() -> mt_all_show(mpi.views, "subset-all"), win)
+            @test !occursin("subset-one", mt_text(mpi.views[2]))
+            @test !occursin("subset-zero", mt_text(mpi.views[2]))
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "REPL tab: key presses and pastes reach only its own pane" begin
+    mt_with() do
+        win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)
+        try
+            MT_GUI.new_tab!(win)
+            MT_GUI.open_mpi_tab!(win)
+            mpi = mt_mpi(win)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            repl = win.tabs.tabs[1].state
+            MT_GUI.pane_sized!(repl, 400, 800, 8, 16)
+            @test MT_ReplSession.is_started(repl.session.repl)
+            @test MT_GUI.mpi_tab_of(win, repl) === nothing
+
+            # The REPL's key goes to its pane only, and the Julia REPL there evaluates it.
+            key_return = 0x01000004
+            @test MT_GUI.key_input!(win, repl, 0, "println(2*21)", 0) === true
+            @test MT_GUI.key_input!(win, repl, key_return, "", 0) === true
+            mt_run_until(() -> any(occursin("42", l) for l in MT_VT.screen_lines(repl.session.repl.term)), win)
+            @test all(!occursin("println", mt_text(v)) for v in mpi.views)
+            @test MT_GUI.paste_input!(win, repl, "") === false
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
 @testset "MPI tab: a pane is resized only when its size in rows or columns changes" begin
     mt_with() do
         win = MT_GUI.WindowState("", nothing, 2; launch_options = MT_OPTIONS)

@@ -19,8 +19,9 @@ import ..ReplSession
 import ..ReplPane
 import ..TabSet
 import ..MpiLauncher
+import ..RankSpec: split_command, shell_join
 using ..ReplSession: describe_exit, has_ended, is_started
-using ..MPIEnsemble: check_tall_rows, check_rank_count, check_startup_count
+using ..MPIEnsemble: check_tall_rows, check_rank_count, check_startup_count, check_startup_command
 using ..VTParse: application_cursor, bracketed_paste
 using ..KeyMap: key_bytes, paste_bytes, is_paste_chord
 using ..PaneModel: follow_row, select_start!, select_extend!, select_extend_start!, select_end!,
@@ -67,7 +68,7 @@ mutable struct TabView
 end
 
 """
-    MpiTab(nranks)
+    MpiTab(nranks, command = String[])
 
 The state of an MPI tab. `views` holds one pane per rank, in rank order, once the job has started, and
 `rank_panes` is the model of those panes that QML repeats. `props` holds the properties that QML reads for
@@ -80,6 +81,8 @@ launcher of the job, and `task` is the task that starts it. A job that has been 
 keeps its `job` until it is restarted or the tab is closed. `result` is what that task produced:
 the job, or the error that stopped the launch, or `nothing` while the launch is in progress. The event loop
 turns the result into panes and state (see `finish_launch!`), so the task itself never touches the window.
+`command` is the command that each rank runs, as arguments with the executable first, or empty for the default
+command (see `MpiLauncher.launch`). It is kept for restarts. `props["command"]` shows it in the tab.
 `targets` is the set of ranks that receive input from the focused pane, and it holds every rank once the job
 has started (see `attach_job!`). `zoomed` is the rank that alone receives input and is shown, or `nothing`.
 Both are read by `route_targets`, and the other rank panes are hidden while a rank is zoomed (see
@@ -90,6 +93,7 @@ has that rank as its only target without any selection.
 """
 mutable struct MpiTab
     const nranks::Int
+    const command::Vector{String}
     const views::Vector{TabView}
     const rank_panes::Any
     const props::QML.JuliaPropertyMap
@@ -103,7 +107,7 @@ mutable struct MpiTab
     zoomed::Union{Nothing, Int}
 end
 
-function MpiTab(nranks::Int)
+function MpiTab(nranks::Int, command::Vector{String} = String[])
     props = QML.JuliaPropertyMap()
     props["status"] = ""
     props["message"] = ""
@@ -112,9 +116,13 @@ function MpiTab(nranks::Int)
     props["panes"] = false
     props["columns"] = rank_columns(nranks)
     props["zoomed"] = false
-    return MpiTab(nranks, TabView[], pane_model(), props, :starting, nothing, nothing, nothing, nothing,
+    props["command"] = command_display(command)
+    return MpiTab(nranks, command, TabView[], pane_model(), props, :starting, nothing, nothing, nothing, nothing,
         Set{Int}(), nothing, nothing)
 end
+
+# The command of an MPI tab as the tab shows it. The default command is named as such.
+command_display(command::Vector{String}) = isempty(command) ? "julia -q (default)" : shell_join(command)
 
 # State of the window. `views` maps the pane ids of the open panes to their views, and `closed_panes`
 # holds the ids of the panes that were closed. `tab_rows` is the tab bar's model, and `mpi_tabs` is the
@@ -125,7 +133,9 @@ end
 # `open_startup_tab!`). `closing` holds ids of tabs whose close was requested; they are closed by the event
 # loop, not by the QML call. `failure` is the first error raised in a QML call, which the event loop
 # rethrows. `offset` is where the fair drain of the panes starts next time (see `TabSet.drain_fairly!`).
-# `launch_options` are keyword arguments for `MpiLauncher.launch`.
+# `launch_options` are keyword arguments for `MpiLauncher.launch`. `startup_command` is the command of the
+# start-up MPI tab (empty for the default command). `props["lastCommand"]` is the command of the MPI tab opened
+# last, as text, which the launch dialog starts with.
 mutable struct WindowState
     const tabs::TabSet.Tabs
     const views::Dict{Int, TabView}
@@ -138,6 +148,7 @@ mutable struct WindowState
     const startup_input::String
     const launch_options::NamedTuple
     const rank_count::Union{Nothing, Int}
+    const startup_command::Vector{String}
     startup_pending::Bool
     const closing::Vector{Int}
     failure::Any
@@ -146,7 +157,7 @@ mutable struct WindowState
 end
 
 function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, Int},
-        rank_count::Union{Nothing, Int}; launch_options::NamedTuple = NamedTuple())
+        rank_count::Union{Nothing, Int}; launch_options::NamedTuple = NamedTuple(), command::Vector{String} = String[])
     props = QML.JuliaPropertyMap()
     props["selected"] = 0
     props["selectedPane"] = 0
@@ -156,12 +167,14 @@ function WindowState(startup_input::AbstractString, tall_rows::Union{Nothing, In
     # `lastRanks` is the rank count of the MPI tab opened last, or 0. The launch dialog starts with it, and
     # with 0 it starts at "Serial Julia REPL".
     props["lastRanks"] = rank_count === nothing ? 0 : rank_count
+    # `lastCommand` is the text of the command of the MPI tab opened last, which the launch dialog starts with.
+    props["lastCommand"] = shell_join(command)
     rows = QML.JuliaItemModel(TabSet.Tab[], false)
     QML.addrole!(rows, "tabId", t -> t.id)
     QML.addrole!(rows, "tabTitle", t -> TabSet.tab_label(t, tab_ended(t)))
     QML.addrole!(rows, "ended", tab_ended)
     return WindowState(TabSet.Tabs(), Dict{Int, TabView}(), Set{Int}(), rows, pane_model(), mpi_tab_model(),
-        props, tall_rows, String(startup_input), launch_options, rank_count, true, Int[], nothing, 0, 1)
+        props, tall_rows, String(startup_input), launch_options, rank_count, command, true, Int[], nothing, 0, 1)
 end
 
 # The model of the open MPI tabs that QML repeats. The roles are the required properties of MpiTabView.qml.
@@ -277,13 +290,14 @@ function end_text(view::TabView)
 end
 
 """
-    run_single_repl(; startup_input = "", tall_rows = nothing, rank_count = nothing)
+    run_single_repl(; startup_input = "", tall_rows = nothing, rank_count = nothing, command = String[])
 
 Open the window and run the Qt event loop on the calling thread until the window is closed. Must be called
 from the main thread, not from an `@async` task. Throws an error if a window is already open in this process.
 
 `rank_count` sets the window's only tab at start-up. `0` opens a serial Julia REPL tab, and a positive integer
-opens an MPI tab that launches that many ranks (see `open_mpi_tab!`). With a positive count, the window has no
+opens an MPI tab that launches that many ranks, each running `command` (see `open_mpi_tab!`). Empty `command`
+runs the default command. A command needs a positive `rank_count`. With a positive count, the window has no
 REPL tab until one is opened with "+". With `nothing`, the window has no tab at start-up and first shows a modal
 launch dialog, which asks for the first tab. The dialog offers "Serial Julia REPL", which opens a REPL tab, or
 "MPI with N ranks", which opens an MPI tab with N ranks, where N is a whole number of 1 or more. Cancel, or
@@ -352,11 +366,13 @@ of that tab, which keep receiving and buffering their output. While the rank is 
 to it. The selection is kept, and takes effect again when the zoom ends, by a second click on the Zoom button.
 The zoom survives a Kill MPI, a restart, and a change of tab. Each MPI tab has its own zoom and selection.
 """
-function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing, rank_count = nothing)
+function run_single_repl(; startup_input::AbstractString = "", tall_rows = nothing, rank_count = nothing,
+        command = String[])
     tall = check_tall_rows(tall_rows)
     ranks = check_startup_count(rank_count)
+    cmd = check_startup_command(command, ranks)
     WINDOW_OPEN[] && error("the MPIEnsemble window is already open in this process")
-    win = WindowState(startup_input, tall, ranks)
+    win = WindowState(startup_input, tall, ranks; command = cmd)
     register_functions!(win)
     WINDOW_OPEN[] = true
     try
@@ -376,7 +392,8 @@ end
 function register_functions!(win::WindowState)
     QML.qmlfunction("windowClosed", () -> (WINDOW_OPEN[] = false; nothing))
     QML.qmlfunction("launchSerial", () -> guarded(() -> launch_serial!(win), win, nothing))
-    QML.qmlfunction("launchMpi", n -> guarded(() -> launch_mpi!(win, Int(n)), win, nothing))
+    QML.qmlfunction("launchMpi", (n, text) -> guarded(() -> launch_mpi!(win, Int(n), String(text)), win, nothing))
+    QML.qmlfunction("commandError", text -> command_error(String(text)))
     QML.qmlfunction("cancelLaunch", () -> guarded(() -> cancel_launch!(win), win, nothing))
     QML.qmlfunction("selectTab", id -> tab_call(tab_id -> select_tab!(win, tab_id), win, id, nothing))
     QML.qmlfunction("closeTab", id -> tab_call(tab_id -> request_close!(win, tab_id), win, id, nothing))
@@ -586,18 +603,20 @@ function show_selection!(win::WindowState)
 end
 
 """
-    open_mpi_tab!(win, nranks) -> Tab
+    open_mpi_tab!(win, nranks, command = String[]) -> Tab
 
-Open an MPI tab with `nranks` ranks after the tabs that are open, select it, and start its ranks. The tab
-shows that the ranks are starting, and the launch runs in a task, so that the window stays responsive while
-the job starts. When the job has started, the tab shows one pane per rank, in rank order; if it cannot start,
-the tab shows the error and the error is printed to standard error. Each MPI tab has its own job, so a window
-may hold several. The window's `lastRanks` becomes `nranks`, which the launch dialog offers next time.
+Open an MPI tab with `nranks` ranks after the tabs that are open, select it, and start its ranks. Each rank runs
+`command`, as arguments with the executable first, or the default command when `command` is empty (see
+`MpiLauncher.launch`). The tab shows that the ranks are starting, and the launch runs in a task, so that the
+window stays responsive while the job starts. When the job has started, the tab shows one pane per rank, in rank
+order; if it cannot start, the tab shows the error and the error is printed to standard error. Each MPI tab has
+its own job and command, so a window may hold several. The window's `lastRanks` becomes `nranks`, and its
+`lastCommand` becomes `command`, which the launch dialog offers next time.
 Throws `ArgumentError`, and opens nothing, if `nranks` is not a positive integer.
 """
-function open_mpi_tab!(win::WindowState, nranks::Integer)
+function open_mpi_tab!(win::WindowState, nranks::Integer, command::Vector{String} = String[])
     n = check_rank_count(nranks)
-    mpi = MpiTab(n)
+    mpi = MpiTab(n, command)
     tab = TabSet.open!(win.tabs, :mpi, mpi)
     set_mpi_status!(mpi, :starting, "Starting $n MPI ranks…")
     show_selection!(win)
@@ -605,6 +624,7 @@ function open_mpi_tab!(win::WindowState, nranks::Integer)
     push!(win.mpi_tabs, tab)
     win.props["askLaunch"] = false
     win.props["lastRanks"] = n
+    win.props["lastCommand"] = shell_join(command)
     mpi.task = @async start_ranks!(mpi, win.launch_options)
     return tab
 end
@@ -613,26 +633,27 @@ end
     open_startup_tab!(win) -> Nothing
 
 Open the first tab that the command line asked for: nothing when the window's `rank_count` is `nothing`
-(the launch dialog then asks), a serial REPL tab when it is `0`, and an MPI tab with that many ranks otherwise.
+(the launch dialog then asks), a serial REPL tab when it is `0`, and an MPI tab with that many ranks, running the
+window's start-up command, otherwise.
 """
 function open_startup_tab!(win::WindowState)
     n = win.rank_count
     n === nothing && return nothing
-    n == 0 ? launch_serial!(win) : open_mpi_tab!(win, n)
+    n == 0 ? launch_serial!(win) : open_mpi_tab!(win, n, win.startup_command)
     return nothing
 end
 
 """
     open_mpi_tab!(win) -> Tab
 
-Open the MPI tab that the command line asked for, with the window's rank count (see `open_mpi_tab!(win, nranks)`).
-Throws if the window's rank count is `nothing` or `0`, which give no MPI tab.
+Open the MPI tab that the command line asked for, with the window's rank count and start-up command (see
+`open_mpi_tab!(win, nranks, command)`). Throws if the window's rank count is `nothing` or `0`, which give no MPI tab.
 """
 function open_mpi_tab!(win::WindowState)
     n = win.rank_count
     (n === nothing || n == 0) &&
         error("the window's rank count is $(repr(n)), so there are no MPI ranks to launch")
-    return open_mpi_tab!(win, n)
+    return open_mpi_tab!(win, n, win.startup_command)
 end
 
 # Set the status of an MPI tab and the properties that QML reads for it. `message` is the text shown in
@@ -675,7 +696,7 @@ end
 # starts (see `close_mpi!`), and the launcher stops what it has started.
 function start_ranks!(mpi::MpiTab, launch_options::NamedTuple)
     try
-        mpi.result = MpiLauncher.launch(mpi.nranks, RANK_ROWS, RANK_COLS; launch_options...)
+        mpi.result = MpiLauncher.launch(mpi.nranks, RANK_ROWS, RANK_COLS; command = mpi.command, launch_options...)
     catch e
         e isa InterruptException && return nothing
         mpi.result = e
@@ -804,11 +825,25 @@ function restart_mpi!(win::WindowState, id::Int)
     return nothing
 end
 
-# The launch dialog's result "MPI with n ranks": open an MPI tab with n ranks. Throws, before anything is
-# opened, if n is not a positive integer.
-function launch_mpi!(win::WindowState, n::Integer)
-    open_mpi_tab!(win, n)
+# The launch dialog's result "MPI with n ranks": open an MPI tab with n ranks, whose ranks run the command
+# written in the dialog's command field, `text` (see `split_command`). Throws, before anything is opened, if n is
+# not a positive integer or the text cannot be split.
+function launch_mpi!(win::WindowState, n::Integer, text::AbstractString = "")
+    command = split_command(text)
+    open_mpi_tab!(win, n, command)
     return nothing
+end
+
+# The error for the text of the launch dialog's command field, or "" when the text splits into arguments. The
+# dialog shows the error and does not offer the launch.
+function command_error(text::AbstractString)
+    try
+        split_command(text)
+    catch e
+        e isa ArgumentError || rethrow()
+        return e.msg
+    end
+    return ""
 end
 
 # The launch dialog's result "Serial Julia REPL": open a REPL tab, which is selected.

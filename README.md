@@ -9,7 +9,7 @@ MPI rank. A window may hold several MPI tabs, each with its own job.
 ## Usage
 
 ```
-julia --project -m MPIEnsemble [N]
+julia --project -m MPIEnsemble [N [command...]]
 ```
 
 The optional argument `N` is a non-negative whole number, and it sets the window's first tab:
@@ -20,8 +20,32 @@ The optional argument `N` is a non-negative whole number, and it sets the window
   REPL", or "MPI with N ranks" for a whole number N of 1 or more. The dialog's result becomes the first tab.
   Cancel closes the window, which then ends the program without error.
 
-Any other argument, such as a negative number, a non-integer or more than one argument, is an error. It is
-reported before a window opens, and the program exits with an error.
+Any argument after `N` is the command that each rank runs, with its executable first. It is only allowed with
+a positive `N`, and it needs `N`: `julia --project -m MPIEnsemble 0 julia` and `julia --project -m MPIEnsemble julia`
+are errors. The shell splits this line into arguments in the usual way, so an argument with spaces must be quoted there,
+for example `'--project=my dir'`; MPIEnsemble does not split them again. The first argument is looked up on the
+PATH of the shell that starts MPIEnsemble, and the other arguments are passed to it unchanged. For example, to run each rank with a chosen Julia and its own flags,
+with two threads each:
+
+```
+julia --project -m MPIEnsemble 4 /opt/julia/bin/julia --project -t2
+```
+
+Without a command, each rank runs the default command, `julia -q`, from the directory of the running Julia.
+An explicit command replaces the default entirely: `-q` is not added to it, and the directory of the running
+Julia is not put first on the PATH. With `4 julia --project -t1`, each rank runs `julia --project -t1` from the PATH.
+
+A command that cannot be found is reported in the rank's pane as `wrapper: command not found: NAME`, and the rank
+has ended with exit status 127. Any other failure to start the command exits with status 126.
+
+The launch dialog has a "Command (optional)" field below the rank count, for the MPI choice. Its text is split
+into arguments in the way a POSIX shell splits them, which `Base.shell_split` does: arguments are separated by
+spaces or tabs, and an argument that contains spaces is enclosed in single or double quotes, for example
+`/opt/julia/bin/julia --project "--sysimage=my image.so"`. Quotes are removed, and outside quotes a backslash
+escapes the next character. An empty or blank field means the default command. A quote that is not closed is shown in the dialog,
+and nothing is launched until it is corrected. The field starts with the command of the last MPI tab opened in
+the window, so the next MPI tab can run the same command. Each MPI tab keeps its own command, which restarts
+reuse, and the tab shows it as a tooltip when you hover over its status line.
 
 The "+" button in the tab bar opens the launch dialog, and its result is a new tab; Cancel then adds nothing.
 
@@ -118,12 +142,12 @@ Julia; its launcher is `mpiexec` on the PATH unless another command is given wit
 
 ## Wrapper
 
-`src/wrapper/wrapper.py` is the per-rank process that runs one Julia REPL in a pseudo-terminal and
-relays it over a Unix socket to the window. It runs with the Python interpreter provided by the
+`src/wrapper/wrapper.py` is the per-rank process that runs the rank's command (by default, a Julia REPL) in a
+pseudo-terminal and relays it over a Unix socket to the window. It runs with the Python interpreter provided by the
 Python_jll package, which is Python 3.11 or later, so no system Python is needed. Installing this package
 downloads that interpreter, which is about 54 MB. The wrapper uses only the Python standard library and runs
-on Linux only. Its docstring gives the environment variables, the frame format and the shutdown and failure
-behaviour. The window starts one wrapper per rank under `mpiexec`, through `MpiLauncher.jl`. Its tests are in
+on Linux only. Its docstring gives the environment variables, the command line, the frame format and the shutdown and
+failure behaviour. The window starts one wrapper per rank under `mpiexec`, through `MpiLauncher.jl`. Its tests are in
 `test/wrapper` (Python unit tests) and `test/test_wrapper.jl` (which runs them, and a round trip from Julia).
 Both use the same Python_jll interpreter, so `python3` on the PATH is not used.
 

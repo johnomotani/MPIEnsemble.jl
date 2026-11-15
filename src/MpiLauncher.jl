@@ -284,11 +284,13 @@ function socket_directory()
     return directory, path
 end
 
-# The directory that the ranks search for julia first. It is the directory of the julia running this code.
-function rank_path()
+# The PATH of the ranks. The default command runs the julia of this process, so the directory of that julia
+# comes first. An explicit command is run through the PATH of this process as it is.
+function rank_path(command::AbstractVector{<:AbstractString})
+    existing = get(ENV, "PATH", "")
+    isempty(command) || return existing
     julia = joinpath(Sys.BINDIR, "julia")
     isfile(julia) || error("julia was not found at $julia, which the MPI ranks need to run")
-    existing = get(ENV, "PATH", "")
     return isempty(existing) ? Sys.BINDIR : Sys.BINDIR * ":" * existing
 end
 
@@ -545,16 +547,18 @@ end
 
 """
     launch(nranks, rows, cols; launcher = mpiexec_command(), python = python_executable(),
-        timeout = 60, wrapper = WRAPPER_SCRIPT) -> Job
+        timeout = 60, wrapper = WRAPPER_SCRIPT, command = String[]) -> Job
 
-Start `nranks` wrappers under `launcher`, as `launcher -n nranks python wrapper`, and return once all of them
-have connected and been sent the initial terminal size of `rows` by `cols` characters.
+Start `nranks` wrappers under `launcher`, as `launcher -n nranks python wrapper [-- command...]`, and return once
+all of them have connected and been sent the initial terminal size of `rows` by `cols` characters.
 
 `launcher` is a command, such as `mpiexec_command()`. `python` is the path of a Python 3.11 or later
-interpreter, by default the one from Python_jll. The launcher, the wrappers and their julia processes run in
-a new session, so that `shutdown!` can stop all of them. The ranks find the julia running this process first
-on their PATH, and get `JULIA_PROJECT` from the active project. `timeout` is the number of seconds allowed for
-all the ranks to connect.
+interpreter, by default the one from Python_jll. The launcher, the wrappers and their child processes run in
+a new session, so that `shutdown!` can stop all of them. Each child process is `command`, which is a vector of
+arguments with the executable first, run as given. It is looked up on the PATH of this process, and receives
+TERM=xterm-256color. An empty `command`, the default, runs `julia -q` from the directory of the julia running
+this process: that directory comes first on the ranks' PATH. Every rank gets `JULIA_PROJECT` from the active
+project. `timeout` is the number of seconds allowed for all the ranks to connect.
 
 Throws an error, after stopping the launcher, if the launcher is not found, exits before all ranks connect,
 a wrapper sends a HELLO with the wrong number of ranks or an invalid rank, or the ranks do not all connect
@@ -562,7 +566,8 @@ within `timeout` seconds. Also throws if `python` is not an executable or is old
 XDG_RUNTIME_DIR is unset or leads to a socket path of 100 bytes or more.
 """
 function launch(nranks::Integer, rows::Integer, cols::Integer; launcher::Cmd = mpiexec_command(),
-        python::AbstractString = python_executable(), timeout::Real = 60, wrapper::AbstractString = WRAPPER_SCRIPT)
+        python::AbstractString = python_executable(), timeout::Real = 60, wrapper::AbstractString = WRAPPER_SCRIPT,
+        command::AbstractVector{<:AbstractString} = String[])
     nranks >= 1 || throw(ArgumentError("the number of ranks must be at least 1, got $nranks"))
     timeout > 0 || throw(ArgumentError("the timeout must be positive, got $timeout"))
     resize = resize_payload(rows, cols)
@@ -574,11 +579,16 @@ function launch(nranks::Integer, rows::Integer, cols::Integer; launcher::Cmd = m
     server = listen(socket_path)
     process = nothing
     try
-        environment = Pair{String, String}["MPIENSEMBLE_SOCKET" => socket_path, "PATH" => rank_path(),
+        environment = Pair{String, String}["MPIENSEMBLE_SOCKET" => socket_path, "PATH" => rank_path(command),
             "TERM" => RANK_TERM]
         project = Base.active_project()
         project === nothing || push!(environment, "JULIA_PROJECT" => project)
         argv = [setsid; launcher.exec; "-n"; string(nranks); python; String(wrapper)]
+        # The command follows "--", so that the wrapper reads it whatever its arguments are.
+        if !isempty(command)
+            push!(argv, "--")
+            append!(argv, String.(command))
+        end
         cmd = Cmd(argv)
         launcher.env === nothing || (cmd = setenv(cmd, launcher.env))
         cmd = addenv(cmd, environment...)

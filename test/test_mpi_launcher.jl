@@ -414,6 +414,60 @@ end
     end
 end
 
+# The first two DATA frames of a rank whose wrapper runs in the fake wrapper's argv mode: its arguments, then its PATH.
+function argv_report(conn::RankConnection)
+    frames = [take_frame!(conn) for _ in 1:2]
+    all(f -> f.type == T_DATA, frames) || error("rank $(conn.rank) sent a frame other than DATA")
+    return String(frames[1].payload), String(frames[2].payload)
+end
+
+@testset "MpiLauncher gives the command to each wrapper, and the PATH depends on it" begin
+    with_runtime() do
+        withenv("FAKE_WRAPPER_MODE" => "argv") do
+            # The default command: the wrapper gets no arguments, and the directory of this julia comes first on PATH.
+            job = launch(2, 24, 80; launcher = FAKE_LAUNCHER, timeout = 30, wrapper = FAKE_WRAPPER)
+            try
+                for conn in job.ranks
+                    arguments, path = argv_report(conn)
+                    @test arguments == "[]\n"
+                    @test path == "PATH '" * Sys.BINDIR * ":" * ENV["PATH"] * "'\n"
+                end
+            finally
+                shutdown!(job)
+            end
+
+            # An explicit command: the arguments follow "--" unchanged, and the PATH is this process's as it is.
+            job = launch(2, 24, 80; launcher = FAKE_LAUNCHER, timeout = 30, wrapper = FAKE_WRAPPER,
+                command = ["/opt/julia bin/julia", "--project=a b", "-t2"])
+            try
+                for conn in job.ranks
+                    arguments, path = argv_report(conn)
+                    @test arguments == "['--', '/opt/julia bin/julia', '--project=a b', '-t2']\n"
+                    @test path == "PATH '" * ENV["PATH"] * "'\n"
+                end
+            finally
+                shutdown!(job)
+            end
+        end
+    end
+end
+
+@testset "MpiLauncher with a command that cannot be found, and the real wrapper" begin
+    with_runtime() do
+        job = launch(1, 24, 80; launcher = FAKE_LAUNCHER, timeout = REPL_TIMEOUT,
+            command = ["no-such-command-for-tests", "-t2"])
+        try
+            conn = job.ranks[1]
+            output = read_until(conn, "wrapper: command not found: no-such-command-for-tests")
+            @test occursin("wrapper: command not found: no-such-command-for-tests", output)
+            @test read_exit(conn) == (127, 0)
+        finally
+            shutdown!(job)
+        end
+        @test process_exited(job.process)
+    end
+end
+
 @testset "MpiLauncher with the real wrapper and julia, using the fake launcher" begin
     with_runtime() do
         # The ranks inherit this process's environment. The expected values are read before the launch, which

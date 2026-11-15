@@ -1881,3 +1881,81 @@ end
     end
     @test mt_fake_processes_gone()
 end
+
+# The arguments that the fake wrapper in argv mode reports for a rank, as Python's repr of the list that its
+# argument vector gives: the wrapper receives "--" and then the command.
+mt_argv_text(command) = "[" * join(("'$a'" for a in vcat("--", command)), ", ") * "]"
+
+@testset "MPI tab: the command is kept after a kill and a restart" begin
+    command = ["/opt/julia", "--project=a b", "-t2"]
+    mt_with(mode = "argv") do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        try
+            tab = MT_GUI.open_mpi_tab!(win, 2, command)
+            mpi = tab.state
+            @test mpi.command == command
+            @test mpi.props["command"] == MT_GUI.shell_join(command)
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            mt_run_until(() -> all(occursin(mt_argv_text(command), mt_text(v)) for v in mpi.views), win)
+
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            @test MT_GUI.restart_mpi!(win, tab.id) === nothing
+            @test mpi.command == command
+            mt_run_until(() -> mpi.status === :running, win)
+            mt_size!(win)
+            # Each pane shows the arguments of both sessions, one after the other.
+            for view in mpi.views
+                mt_run_until(() -> length(findall(mt_argv_text(command), mt_text(view))) == 2, win)
+            end
+            @test win.failure === nothing
+            @test MT_GUI.kill_mpi!(win, tab.id) === nothing
+            mt_run_until(() -> mpi.status === :killed, win)
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: two MPI tabs each run their own command" begin
+    mt_with(mode = "argv") do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = MT_OPTIONS)
+        try
+            first = MT_GUI.open_mpi_tab!(win, 2, ["julia", "-t2"])
+            second = MT_GUI.open_mpi_tab!(win, 1)
+            @test first.state.command == ["julia", "-t2"]
+            @test second.state.command == String[]
+            @test second.state.props["command"] == "julia -q (default)"
+            mt_run_until(() -> first.state.status !== :starting && second.state.status !== :starting, win)
+            foreach(v -> MT_GUI.pane_sized!(v, 800, 400, 8, 16), vcat(first.state.views, second.state.views))
+            mt_run_until(() -> all(occursin(mt_argv_text(["julia", "-t2"]), mt_text(v)) for v in first.state.views), win)
+            mt_run_until(() -> occursin("PATH '" * Sys.BINDIR, mt_text(only(second.state.views))), win)
+            # The default command's rank gets no arguments, and no -t2 from the other tab.
+            @test occursin("[]", mt_text(only(second.state.views)))
+            @test !occursin("-t2", mt_text(only(second.state.views)))
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "MPI tab: a command that cannot be found shows its message in each pane, and the ranks end" begin
+    # The real wrapper runs here, and the command is not found, so each rank's child fails at once.
+    withenv("XDG_RUNTIME_DIR" => get(ENV, "XDG_RUNTIME_DIR", tempdir())) do
+        win = MT_GUI.WindowState("", nothing, nothing; launch_options = (launcher = MT_FAKE_LAUNCHER, timeout = MT_TIMEOUT))
+        try
+            tab = MT_GUI.open_mpi_tab!(win, 2, ["no-such-command-for-tests"])
+            mpi = tab.state
+            mt_run_until(() -> mpi.status !== :starting, win)
+            mt_size!(win)
+            for view in mpi.views
+                mt_run_until(() -> occursin("wrapper: command not found: no-such-command-for-tests", mt_text(view)), win)
+            end
+            mt_run_until(() -> mpi.status === :ended, win)
+            @test all(v -> occursin("Rank $(v.rank) ended: Julia exited with code 127", MT_GUI.end_text(v)), mpi.views)
+            @test win.failure === nothing
+        finally
+            MT_GUI.shutdown!(win)
+        end
+    end
+end

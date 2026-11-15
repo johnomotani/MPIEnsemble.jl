@@ -1,6 +1,6 @@
-"""Per-rank wrapper: runs one Julia REPL in a pseudo-terminal and relays it over a Unix socket.
+"""Per-rank wrapper: runs one command in a pseudo-terminal and relays it over a Unix socket.
 
-Start one wrapper per MPI rank, for example `mpiexec -n 2 PYTHON wrapper.py`, where PYTHON is the
+Start one wrapper per MPI rank, for example `mpiexec -n 2 PYTHON wrapper.py -- julia -t2`, where PYTHON is the
 Python interpreter; `MpiLauncher.python_executable()` returns the one from Python_jll. Uses only the
 standard library.
 Requires Linux and Python 3.11 or later (for `os.login_tty`); on other systems it exits with status 1
@@ -16,10 +16,16 @@ Environment
         100 bytes do not fit in the socket address.
 
     JULIA_PROJECT
-        Not read by the wrapper. It is inherited by julia, as is the rest of the environment.
+        Not read by the wrapper. It is inherited by the child, as is the rest of the environment.
 
-    Julia is the `julia` found on PATH, run as `julia -q` with TERM=xterm-256color. The
+Command line
+    `wrapper.py` alone runs the default command, `julia -q`, where `julia` is found on PATH. The
     launcher must put the Julia executable it wants first on PATH.
+
+    `wrapper.py -- COMMAND [ARGUMENT...]` runs COMMAND with the given arguments, exactly as given: the
+    first is looked up on PATH, and the rest are passed unchanged. Everything after `--` is the command.
+
+    The child is started with TERM=xterm-256color in either case.
 
 Protocol
     Every message is a frame: a 1-byte type, a 4-byte big-endian payload length, then the
@@ -34,31 +40,31 @@ Protocol
                       SIG_INTERRUPT (2) is accepted; it is sent to the REPL as Ctrl+C.
         T_HELLO = 4   Wrapper to parent, once, after connecting. Payload: rank, size and pid,
                       three unsigned 32-bit big-endian integers.
-        T_EXIT = 5    Wrapper to parent, last, when julia has exited. Payload: exit code, then
-                      terminating signal, as two signed 32-bit big-endian integers. A julia
+        T_EXIT = 5    Wrapper to parent, last, when the child has exited. Payload: exit code, then
+                      terminating signal, as two signed 32-bit big-endian integers. A child
                       killed by a signal has code 0 and the signal number; otherwise the signal
                       is 0.
 
     The wrapper sends HELLO on connecting. The parent must then send RESIZE as its first frame:
-    it gives the initial terminal size, and julia is started only after it arrives. Any other
+    it gives the initial terminal size, and the child is started only after it arrives. Any other
     first frame is an error. Frames after that may come in any order.
 
 Shutdown
     When the parent closes the socket, the wrapper writes Ctrl+D to the terminal, keeps relaying
-    output (which is discarded, as the parent is gone), and sends SIGKILL to julia if it has not
-    exited after 5 seconds. Julia's exit status is not reported, because the socket is closed.
+    output (which is discarded, as the parent is gone), and sends SIGKILL to the child if it has not
+    exited after 5 seconds. The child's exit status is not reported, because the socket is closed.
 
 Failures
-    If julia cannot be started, the child writes a message to the terminal, so it appears in
-    the pane. The wrapper then sends EXIT with code 127 if julia was not found, or 126 for any
-    other failure to exec it.
+    If the command cannot be started, the child writes a message to the terminal, so it appears in
+    the pane: "command not found: NAME" when the first argument is not found on PATH. The wrapper
+    then sends EXIT with code 127 for that, or 126 for any other failure to exec the command.
 
-    If the socket cannot be reached, or the parent sends a malformed or unexpected frame, the
-    wrapper writes a message to stderr, kills julia with SIGKILL and exits with status 1.
-    No EXIT frame is sent, so the parent sees the socket end without one.
+    If the socket cannot be reached, the parent sends a malformed or unexpected frame, or the
+    command line is malformed, the wrapper writes a message to stderr, kills the child with SIGKILL
+    and exits with status 1. No EXIT frame is sent, so the parent sees the socket end without one.
 
-    The wrapper writes nothing to stderr in normal operation. Its exit status is julia's exit
-    code, or 1 if julia was killed by a signal.
+    The wrapper writes nothing to stderr in normal operation. Its exit status is the child's exit
+    code, or 1 if the child was killed by a signal.
 """
 
 import sys
@@ -92,7 +98,7 @@ RANK_VARIABLES = (
     ("PMIX_RANK", "OMPI_COMM_WORLD_SIZE"),
     ("PMI_RANK", "PMI_SIZE"),
 )
-JULIA_ARGV = ["julia", "-q"]
+DEFAULT_COMMAND = ["julia", "-q"]
 
 # Prefix of messages on stderr. Includes the rank once it is known.
 prefix = "wrapper"
@@ -197,47 +203,61 @@ def _report_in_child(message):
         pass  # No other channel is open; the exit status still reports the failure.
 
 
-def exec_julia(master, slave, env):
-    """Child side of the fork. Only returns if julia cannot be started, giving the exit status."""
-    # Python ignores SIGPIPE, and exec would pass that on to julia.
+def parse_command(argv):
+    """Return the command to run, given the arguments after the script path.
+
+    No arguments give DEFAULT_COMMAND. Otherwise the arguments must be `--` followed by the command.
+    """
+    if not argv:
+        return list(DEFAULT_COMMAND)
+    if argv[0] != "--":
+        raise WrapperError(f"unexpected argument {argv[0]!r}; the command must follow --")
+    if len(argv) == 1:
+        raise WrapperError("-- must be followed by the command to run")
+    return argv[1:]
+
+
+def exec_command(master, slave, command, env):
+    """Child side of the fork. Only returns if the command cannot be started, giving the exit status."""
+    # Python ignores SIGPIPE, and exec would pass that on to the command.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     try:
         os.close(master)
         os.login_tty(slave)
-        os.execvpe(JULIA_ARGV[0], JULIA_ARGV, env)
+        os.execvpe(command[0], command, env)
     except FileNotFoundError:
-        _report_in_child("wrapper: julia was not found on PATH")
+        _report_in_child(f"wrapper: command not found: {command[0]}")
         return EXIT_NOT_FOUND
     except BaseException as e:
-        _report_in_child(f"wrapper: cannot start julia: {e}")
+        _report_in_child(f"wrapper: cannot start {command[0]}: {e}")
         return EXIT_NOT_EXECUTABLE
 
 
-def spawn_julia(master, slave):
+def spawn_command(master, slave, command):
     env = dict(os.environ, TERM="xterm-256color")
     pid = os.fork()
     if pid == 0:
-        os._exit(exec_julia(master, slave, env))
+        os._exit(exec_command(master, slave, command, env))
     return pid
 
 
 class Session:
-    """Relays one julia process between its terminal and the socket."""
+    """Relays one child process between its terminal and the socket."""
 
     def __init__(self, sock, reader, master, pid, queued):
         self.sock = sock
         self.reader = reader
         self.master = master
         self.pid = pid
-        self.queued = queued           # frames received before julia started
-        self.status = None             # waitpid status once julia has exited
+        self.queued = queued           # frames received before the child started
+        self.status = None             # waitpid status once the child has exited
         self.pending_in = bytearray()  # terminal input not yet written
         self.sock_open = True
         self.master_open = True
-        self.kill_at = None            # monotonic time at which julia is killed
+        self.kill_at = None            # monotonic time at which the child is killed
 
     def serve(self):
-        """Relay until julia exits, then send EXIT. Returns the wrapper's exit status."""
+        """Relay until the child exits, then send EXIT. Returns the wrapper's exit status."""
         try:
             for frame_type, payload in self.queued:
                 self.handle(frame_type, payload)
@@ -263,14 +283,14 @@ class Session:
         return self.status is not None
 
     def exit_fields(self):
-        """(code, signal) for the EXIT frame. Valid once julia has exited."""
+        """(code, signal) for the EXIT frame. Valid once the child has exited."""
         code = os.waitstatus_to_exitcode(self.status)
         if code < 0:
             return 0, -code
         return code, 0
 
     def kill_child(self):
-        # Only poll_child reaps julia, so while status is None the pid still refers to julia.
+        # Only poll_child reaps the child, so while status is None the pid still refers to it.
         if self.status is None:
             os.kill(self.pid, signal.SIGKILL)
 
@@ -300,7 +320,7 @@ class Session:
         except OSError as e:
             if e.errno != errno.EIO:
                 raise
-            # EIO: julia has closed the terminal. Its exit is reported by the EXIT frame.
+            # EIO: the child has closed the terminal. Its exit is reported by the EXIT frame.
             self.master_open = False
             self.pending_in.clear()
             return
@@ -314,7 +334,7 @@ class Session:
         except OSError as e:
             if e.errno != errno.EIO:
                 raise
-            data = b""  # EIO: julia has closed the terminal.
+            data = b""  # EIO: the child has closed the terminal.
         if not data:
             self.master_open = False
             return
@@ -351,11 +371,11 @@ class Session:
     def check_kill_timer(self):
         if self.kill_at is not None and time.monotonic() >= self.kill_at and self.status is None:
             self.kill_at = None
-            warn(f"julia did not exit {SHUTDOWN_TIMEOUT:g} s after Ctrl+D; sending SIGKILL")
+            warn(f"the command did not exit {SHUTDOWN_TIMEOUT:g} s after Ctrl+D; sending SIGKILL")
             os.kill(self.pid, signal.SIGKILL)
 
     def drain_output(self):
-        # Julia has exited. Read what the terminal still holds, until it reports end of file or
+        # The child has exited. Read what the terminal still holds, until it reports end of file or
         # nothing arrives for one poll interval.
         while self.master_open:
             ready, _, _ = select.select([self.master], [], [], POLL_INTERVAL)
@@ -386,6 +406,7 @@ def first_frames(reader):
 
 def run():
     global prefix
+    command = parse_command(sys.argv[1:])
     rank, size = rank_info(os.environ)
     prefix = f"wrapper (rank {rank})"
     sock = connect(os.environ.get("MPIENSEMBLE_SOCKET", ""))
@@ -402,7 +423,7 @@ def run():
         master, slave = os.openpty()
         set_winsize(slave, rows, cols)
         os.set_blocking(master, False)
-        pid = spawn_julia(master, slave)
+        pid = spawn_command(master, slave, command)
         os.close(slave)
         return Session(sock, reader, master, pid, frames[1:]).serve()
     finally:

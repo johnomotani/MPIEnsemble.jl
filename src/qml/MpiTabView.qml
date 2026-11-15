@@ -68,7 +68,16 @@ Item {
         height: 36
         visible: mpiTab.mpiProps.panes
 
+        // The command the ranks run, shown on hover over the bar. The bar has a height even when its note is empty.
+        HoverHandler {
+            id: barHover
+        }
+        Controls.ToolTip.visible: barHover.hovered
+        Controls.ToolTip.text: "Command: " + mpiTab.mpiProps.command
+        Controls.ToolTip.delay: 500
+
         Text {
+            id: barMessage
             anchors.left: parent.left
             anchors.right: parent.right
             // Leaves room for the buttons, which are at most 112 pixels wide and 12 pixels from the note.

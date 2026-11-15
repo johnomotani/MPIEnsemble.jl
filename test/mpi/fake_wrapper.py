@@ -9,6 +9,8 @@ starting julia. FAKE_WRAPPER_MODE selects what it does:
     ignore_close Ignores SIGTERM and, when the socket closes, sleeps and does not exit.
     silent       Never connects.
     exit_on_input Echoes as echo does, but when a DATA frame contains "exit", sends EXIT 0 and exits.
+    argv         Echoes as echo does, but first sends DATA with the repr of its arguments (sys.argv[1:]), then a
+                 line with its PATH.
 
 Any mode may be given as MODE@RANK, which applies it to that rank only. The echo mode writes "resize R C"
 for each RESIZE frame it receives, and the initial one.
@@ -86,7 +88,11 @@ if mode == "exit_frame":
     sock.sendall(frame(T_EXIT, struct.pack(">ii", 7, 0)))
     sys.exit(0)
 
-# echo
+# echo, and argv, which also reports its arguments and PATH
+if mode == "argv":
+    # Lines end with CR LF, as a terminal sends them, so that the pane starts each line at its left edge.
+    sock.sendall(frame(T_DATA, (repr(sys.argv[1:]) + "\r\n").encode()))
+    sock.sendall(frame(T_DATA, ("PATH " + repr(os.environ.get("PATH", "")) + "\r\n").encode()))
 sock.sendall(frame(T_DATA, f"resize {rows} {cols}\n".encode()))
 while True:
     item = read_frame(sock, buf)

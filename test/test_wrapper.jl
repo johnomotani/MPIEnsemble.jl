@@ -32,9 +32,9 @@ end
 # PATH for children that should find the same julia as this process.
 wrapper_path() = Sys.BINDIR * ":" * get(ENV, "PATH", "")
 
-# Start the wrapper with stdout and stderr going to `log`.
-function wrapper_start(python, env, log::IO)
-    cmd = setenv(Cmd([python, "-X", "dev", "-W", "error::DeprecationWarning", WRAPPER_SCRIPT]), env)
+# Start the wrapper with stdout and stderr going to `log`. `args` follow the script path on the command line.
+function wrapper_start(python, env, log::IO; args::Vector{String} = String[])
+    cmd = setenv(Cmd([python, "-X", "dev", "-W", "error::DeprecationWarning", WRAPPER_SCRIPT, args...]), env)
     return run(pipeline(cmd; stdin = devnull, stdout = log, stderr = log); wait = false)
 end
 
@@ -91,17 +91,19 @@ function wrapper_read_until_exit(conn)
     end
 end
 
-# Run the wrapper for one session, with a fresh socket in `dir`. Reads HELLO, which must report
-# rank 0 of 1 rank, and sends an initial terminal size of 24 by 80. Then returns `f(conn)`, once the
-# wrapper has ended. The result is `(; result, exitcode, termsignal, log)`.
-function wrapper_session(f, python, dir::AbstractString; path::AbstractString)
+# Run the wrapper for one session, with a fresh socket in `dir`. With `command` given, the wrapper runs it, as
+# `wrapper.py -- command...`; otherwise it runs the default command. Reads HELLO, which must report rank 0 of
+# 1 rank, and sends an initial terminal size of 24 by 80. Then returns `f(conn)`, once the wrapper has ended.
+# The result is `(; result, exitcode, termsignal, log)`.
+function wrapper_session(f, python, dir::AbstractString; path::AbstractString, command::Vector{String} = String[])
     socket = joinpath(dir, "s")
     @test sizeof(socket) < 100
     server = listen(socket)
     log = joinpath(dir, "wrapper.log")
     env = wrapper_env(; socket, path, rank = 0)
     io = open(log, "w")
-    proc = wrapper_start(python, env, io)
+    args = isempty(command) ? String[] : ["--", command...]
+    proc = wrapper_start(python, env, io; args)
     watchdog = wrapper_watchdog(proc, server)
     try
         conn = accept(server)
@@ -174,8 +176,42 @@ end
             end
             @test session.result.code == 127
             @test session.result.signal == 0
-            @test occursin("julia was not found on PATH", session.result.output)
+            @test occursin("wrapper: command not found: julia", session.result.output)
             @test session.exitcode == 127
+            @test isempty(session.log)
+        end
+    end
+
+    @testset "command not found" begin
+        mktempdir() do dir
+            session = wrapper_session(python, dir; path = wrapper_path(),
+                command = ["no-such-command-for-tests", "-t2"]) do conn
+                wrapper_read_until_exit(conn)
+            end
+            @test session.result.code == 127
+            @test session.result.signal == 0
+            @test occursin("wrapper: command not found: no-such-command-for-tests", session.result.output)
+            @test session.exitcode == 127
+            @test isempty(session.log)
+        end
+    end
+
+    @testset "command with arguments containing spaces, and TERM" begin
+        # `sh` stands in for the command. It prints each argument in brackets, so an argument that was split or
+        # merged shows, and the TERM it was given.
+        script = "for a in \"\$@\"; do printf '[%s]\\n' \"\$a\"; done; printf 'TERM=%s\\n' \"\$TERM\""
+        command = ["sh", "-c", script, "argv", "one two", "-t2", "--project=a b"]
+        mktempdir() do dir
+            session = wrapper_session(python, dir; path = wrapper_path(), command) do conn
+                wrapper_read_until_exit(conn)
+            end
+            @test session.result.code == 0
+            @test session.result.signal == 0
+            @test session.exitcode == 0
+            for line in ("[one two]", "[-t2]", "[--project=a b]", "TERM=xterm-256color")
+                @test occursin(line, session.result.output)
+            end
+            @test !occursin("[-q]", session.result.output)
             @test isempty(session.log)
         end
     end

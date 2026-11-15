@@ -165,3 +165,87 @@ end
         end
     end
 end
+
+# The text of a rank pane: its log lines, then the lines of its screen (as in test_mpi_tab.jl).
+ld_text(view) = join(vcat([e.text for e in MPIEnsemble.LineLog.window(view.session.log, 1:length(view.session.log))],
+    [rstrip(l) for l in MPIEnsemble.VTParse.screen_lines(view.session.repl.term)]), "\n")
+
+# Run `f` with the fake wrapper in argv mode, which reports its arguments and PATH in each rank's pane.
+ld_with_argv(f) = withenv(f, "XDG_RUNTIME_DIR" => get(ENV, "XDG_RUNTIME_DIR", tempdir()), "FAKE_WRAPPER_MODE" => "argv")
+
+# Size every rank pane, which creates its terminal, as QML does when it shows the pane.
+ld_size!(mpi) = foreach(v -> LD_GUI.pane_sized!(v, 800, 400, 8, 16), mpi.views)
+
+@testset "launch dialog: the command text is split into the tab's command, and reaches the ranks" begin
+    win = LD_GUI.WindowState("", nothing, nothing; launch_options = LD_OPTIONS)
+    ld_with_argv() do
+        try
+            LD_GUI.launch_mpi!(win, 2, "/opt/julia \"bin dir/julia\"   --project=\"a b\" -t2")
+            tab = win.tabs.tabs[1]
+            mpi = tab.state
+            @test mpi.command == ["/opt/julia", "bin dir/julia", "--project=a b", "-t2"]
+            @test mpi.props["command"] == LD_GUI.shell_join(mpi.command)
+            @test win.props["lastCommand"] == LD_GUI.shell_join(mpi.command)
+            ld_run_until(() -> mpi.status !== :starting, win)
+            ld_size!(mpi)
+            for view in mpi.views
+                ld_run_until(() -> occursin("['--', '/opt/julia', 'bin dir/julia', '--project=a b', '-t2']", ld_text(view)), win)
+            end
+        finally
+            LD_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "launch dialog: blank command text is the default command, and is what the next dialog starts with" begin
+    win = LD_GUI.WindowState("", nothing, nothing; launch_options = LD_OPTIONS)
+    ld_with_argv() do
+        try
+            LD_GUI.launch_mpi!(win, 1, "julia -t2")
+            @test win.props["lastCommand"] == "julia -t2"
+            LD_GUI.launch_mpi!(win, 1, "  \t ")
+            mpi = win.tabs.tabs[2].state
+            @test mpi.command == String[]
+            @test mpi.props["command"] == "julia -q (default)"
+            @test win.props["lastCommand"] == ""
+            ld_run_until(() -> mpi.status !== :starting, win)
+            ld_size!(mpi)
+            ld_run_until(() -> occursin("[]", ld_text(only(mpi.views))), win)
+            @test !occursin("-t2", ld_text(only(mpi.views)))
+        finally
+            LD_GUI.shutdown!(win)
+        end
+    end
+end
+
+@testset "launch dialog: a command text that cannot be split is an error, and launches nothing" begin
+    win = LD_GUI.WindowState("", nothing, nothing; launch_options = LD_OPTIONS)
+    @test LD_GUI.command_error("julia \"-t2") == "cannot split the command \"julia \"-t2\": unterminated double quote"
+    @test LD_GUI.command_error("julia --project=a\\") == "cannot split the command \"julia --project=a\\\": dangling backslash"
+    @test LD_GUI.command_error("julia -t2") == ""
+    @test LD_GUI.command_error("") == ""
+    @test_throws "cannot split the command" LD_GUI.launch_mpi!(win, 2, "julia \"-t2")
+    @test isempty(win.tabs.tabs)
+    @test win.props["askLaunch"] == true
+    @test win.props["lastCommand"] == ""
+    @test win.props["lastRanks"] == 0
+end
+
+@testset "launch dialog: a command-line command is the start-up MPI tab's command" begin
+    win = LD_GUI.WindowState("", nothing, 2; launch_options = LD_OPTIONS, command = ["/opt/julia", "-t2"])
+    @test win.props["lastCommand"] == "/opt/julia -t2"
+    ld_with_argv() do
+        try
+            LD_GUI.open_startup_tab!(win)
+            mpi = only(t.state for t in win.tabs.tabs)
+            @test mpi.command == ["/opt/julia", "-t2"]
+            ld_run_until(() -> mpi.status !== :starting, win)
+            ld_size!(mpi)
+            for view in mpi.views
+                ld_run_until(() -> occursin("['--', '/opt/julia', '-t2']", ld_text(view)), win)
+            end
+        finally
+            LD_GUI.shutdown!(win)
+        end
+    end
+end

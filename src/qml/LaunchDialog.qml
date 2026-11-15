@@ -3,20 +3,23 @@ import QtQuick.Controls as Controls
 import jlqml
 
 // Modal dialog that chooses the kind of the next tab: a serial Julia REPL, or an MPI job with a whole number
-// of ranks, 1 or more. Main.qml opens it at start-up while the window has no tab (`windowProps.askLaunch`),
-// and the + button opens it otherwise. OK, or Return, passes the choice to Julia (Julia.launchSerial or
-// Julia.launchMpi). Cancel, or Escape, calls Julia.cancelLaunch.
+// of ranks, 1 or more, each rank running an optional command. Main.qml opens it at start-up while the window has
+// no tab (`windowProps.askLaunch`), and the + button opens it otherwise. OK, or Return, passes the choice to Julia
+// (Julia.launchSerial or Julia.launchMpi, with the command text). Cancel, or Escape, calls Julia.cancelLaunch.
 Controls.Dialog {
     id: dialog
 
-    readonly property bool canConfirm: serialRadio.checked || (mpiRadio.checked && field.acceptableInput)
+    // The error for the command text, or "" when it splits into arguments (Julia.commandError).
+    readonly property string commandError: Julia.commandError(commandField.text)
+    readonly property bool canConfirm: serialRadio.checked ||
+        (mpiRadio.checked && field.acceptableInput && commandError === "")
 
     // Set once the dialog has been answered, so that a second Return or OK does not answer it again.
     property bool answered: false
 
     parent: Controls.Overlay.overlay
     anchors.centerIn: parent
-    width: 360
+    width: 380
     padding: 16
     modal: true
     focus: true
@@ -31,12 +34,13 @@ Controls.Dialog {
         mpiRadio.checked = last > 0
         serialRadio.checked = !mpiRadio.checked
         field.text = last > 0 ? String(last) : ""
+        commandField.text = windowProps.lastCommand
     }
     onAccepted: {
         if (serialRadio.checked)
             Julia.launchSerial()
         else
-            Julia.launchMpi(parseInt(field.text, 10))
+            Julia.launchMpi(parseInt(field.text, 10), commandField.text)
     }
     onRejected: Julia.cancelLaunch()
 
@@ -196,6 +200,43 @@ Controls.Dialog {
             width: parent.width
             text: "Whole number of MPI ranks, 1 or more"
             color: "#a9b1d6"
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
+        }
+
+        // The command that each rank runs, split into arguments by Julia (see RankSpec.split_command). Empty
+        // means the default command, julia -q, from the directory of the running Julia.
+        Text {
+            text: "Command (optional)"
+            color: "#c0caf5"
+            font.pixelSize: 13
+        }
+
+        Controls.TextField {
+            id: commandField
+            width: parent.width
+            height: 30
+            enabled: mpiRadio.checked
+            placeholderText: "empty: julia -q"
+            placeholderTextColor: "#565f89"
+            color: "#c0caf5"
+            selectionColor: "#3d59a1"
+            selectedTextColor: "#c0caf5"
+            font.pixelSize: 14
+            selectByMouse: true
+            background: Rectangle {
+                color: commandField.enabled ? "#16161e" : "#1f2335"
+                radius: 3
+                border.color: commandField.activeFocus ? "#7aa2f7" : "#292e42"
+            }
+        }
+
+        // Says how the command text is split, and shows why it cannot be split.
+        Text {
+            width: parent.width
+            text: dialog.commandError !== "" && mpiRadio.checked ? dialog.commandError :
+                "Program and arguments, separated by spaces; quote an argument that contains spaces"
+            color: dialog.commandError !== "" && mpiRadio.checked ? "#f7768e" : "#a9b1d6"
             font.pixelSize: 13
             wrapMode: Text.WordWrap
         }

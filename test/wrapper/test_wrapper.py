@@ -2,7 +2,9 @@
 
 Run with any Python 3.11 or later, for example `python3 -B -m unittest discover -s test/wrapper`
 (the Julia tests run them with the interpreter from Python_jll). Each test starts the wrapper with the
-interpreter that runs the tests, and julia from PATH. The tests need Linux, and a julia on PATH.
+interpreter that runs the tests. Without a command given, the wrapper runs julia from PATH. Tests that
+give a command use `sh` as a stand-in for it, which only echoes its arguments. The tests need Linux, and
+a julia on PATH for the default command.
 """
 
 import os
@@ -33,9 +35,9 @@ def wrapper_env(**extra):
     return env
 
 
-def run_wrapper(env):
-    """Run the wrapper to completion, returning (status, stderr text)."""
-    proc = subprocess.run([sys.executable, "-X", "dev", "-W", "error::DeprecationWarning", WRAPPER],
+def run_wrapper(env, args=()):
+    """Run the wrapper to completion with `args` after the script path, returning (status, stderr text)."""
+    proc = subprocess.run([sys.executable, "-X", "dev", "-W", "error::DeprecationWarning", WRAPPER, *args],
                           env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, timeout=WAIT_TIMEOUT)
     return proc.returncode, proc.stderr.decode(errors="replace")
@@ -44,7 +46,7 @@ def run_wrapper(env):
 class Session:
     """A wrapper started for one rank, connected to a socket that the test listens on."""
 
-    def __init__(self, rank=0, size=1, extra_env=None):
+    def __init__(self, rank=0, size=1, extra_env=None, command=None):
         self.dir = tempfile.mkdtemp(prefix="mpie-")
         self.path = os.path.join(self.dir, "s")
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -52,8 +54,9 @@ class Session:
         self.server.listen(1)
         env = wrapper_env(OMPI_COMM_WORLD_RANK=str(rank), OMPI_COMM_WORLD_SIZE=str(size),
                           MPIENSEMBLE_SOCKET=self.path, **(extra_env or {}))
+        args = ["--", *command] if command else []
         self.proc = subprocess.Popen(
-            [sys.executable, "-X", "dev", "-W", "error::DeprecationWarning", WRAPPER],
+            [sys.executable, "-X", "dev", "-W", "error::DeprecationWarning", WRAPPER, *args],
             env=env, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.conn = None
         self.buf = b""
@@ -231,8 +234,41 @@ class WrapperTests(unittest.TestCase):
         s.start()
         s.pump(timeout=WAIT_TIMEOUT)
         self.assertEqual(s.exit, (127, 0), s.out)
-        self.assertIn(b"julia was not found on PATH", s.out)
+        self.assertIn(b"wrapper: command not found: julia", s.out)
         self.assertEqual(s.wait_status(), 127)
+
+    def test_command_arguments_are_passed_exactly_and_term_is_set(self):
+        command = ["sh", "-c", 'for a in "$@"; do printf "[%s]\n" "$a"; done; printf "TERM=%s\n" "$TERM"',
+                   "argv", "one two", "-t2", "--project=a b"]
+        s = self.session(command=command)
+        s.start()
+        s.pump(timeout=WAIT_TIMEOUT)
+        self.assertEqual(s.exit, (0, 0), s.out)
+        out = s.out.decode()
+        for line in ("[one two]", "[-t2]", "[--project=a b]", "TERM=xterm-256color"):
+            self.assertIn(line, out)
+        self.assertNotIn("[-q]", out)
+        self.assertEqual(s.wait_status(), 0)
+        self.assert_quiet(s)
+
+    def test_command_not_found_names_the_command_and_exits_127(self):
+        s = self.session(command=["no-such-command-for-tests", "-x"])
+        s.start()
+        s.pump(timeout=WAIT_TIMEOUT)
+        self.assertEqual(s.exit, (127, 0), s.out)
+        self.assertIn(b"wrapper: command not found: no-such-command-for-tests", s.out)
+        self.assertEqual(s.wait_status(), 127)
+
+    def test_command_line_must_have_the_command_after_the_separator(self):
+        env = wrapper_env()
+        status, err = run_wrapper(env, ["julia"])
+        self.assertEqual(status, 1)
+        self.assertIn("unexpected argument 'julia'; the command must follow --", err)
+        self.assertNotIn("Traceback", err)
+        status, err = run_wrapper(env, ["--"])
+        self.assertEqual(status, 1)
+        self.assertIn("-- must be followed by the command to run", err)
+        self.assertNotIn("Traceback", err)
 
     def session_dir_without_julia(self):
         d = tempfile.mkdtemp(prefix="mpie-nojulia-")
